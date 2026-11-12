@@ -10,7 +10,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933.svg)](https://nodejs.org)
 [![esbuild](https://img.shields.io/badge/esbuild-0.24-FFCF00.svg)](https://esbuild.github.io)
 
-[English](README_en.md)
+[中文](README.md) · [English](README_en.md)
 
 [开始玩](#开始玩) · [从源码构建](#从源码构建) · [操作](#操作) · [关卡](#关卡) · [提示词与 Skill](#提示词与-skill)
 
@@ -19,6 +19,8 @@
 星织号迫降在荒漠星球卡里斯-4，乘员已经撤离。辅助机器人 Milo 留下来，采集矿物、熔炼零件，把动力、通信、维生、导航和推进装回船体，完成起飞点检后返航回家。
 
 项目构建产出是不足1MB的单个HTML文件，双击即可通过浏览器运行，无需网络和额外资源加载。界面已适配简中和英文，电脑/平板/手机均支持运行。
+
+<img src="./pic/interface-zh.webp" alt="星织号中文界面" width="960" />
 
 ## 特性
 
@@ -99,6 +101,9 @@ node ../skills/game-web3d-standalone-builder/scripts/audit-standalone-html.mjs
 
 ```text
 .
+├── pic/
+│   ├── interface-zh.webp    中文界面
+│   └── interface-en.webp    英文界面
 ├── prompts/                 本游戏的复刻提示词
 ├── skills/                  离线 Web 3D 游戏的 Agent Skill
 ├── starweaver/

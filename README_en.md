@@ -10,7 +10,7 @@ An offline 3D mission game of exploration, collection, and progression, under 1 
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933.svg)](https://nodejs.org)
 [![esbuild](https://img.shields.io/badge/esbuild-0.24-FFCF00.svg)](https://esbuild.github.io)
 
-[中文](README.md)
+[中文](README.md) · [English](README_en.md)
 
 [Play](#play) · [Build from source](#build-from-source) · [Controls](#controls) · [Levels](#levels) · [Prompts and the skill](#prompts-and-the-skill)
 
@@ -19,6 +19,8 @@ An offline 3D mission game of exploration, collection, and progression, under 1 
 The Starweaver crash-lands on the desert planet Kharis-4. The crew has already evacuated. The helper robot Milo stays behind, gathers minerals, smelts parts, fits power, communications, life support, navigation, and propulsion back onto the hull, finishes the pre-flight checks, and returns home.
 
 The build output is a single HTML file under 1 MB. Double-click it to run in a browser, with no network and no extra assets to load. The interface supports Simplified Chinese and English, and runs on desktop, tablet, and phone.
+
+<img src="./pic/interface-en.webp" alt="Starweaver English interface" width="960" />
 
 ## Features
 
@@ -99,6 +101,9 @@ Side tasks provide extra materials and do not block the main path. When material
 
 ```text
 .
+├── pic/
+│   ├── interface-zh.webp    Chinese interface
+│   └── interface-en.webp    English interface
 ├── prompts/                 Reproduction prompt for this game
 ├── skills/                  Agent skill for offline Web 3D games
 ├── starweaver/
