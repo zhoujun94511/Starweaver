@@ -1,0 +1,6 @@
+.idea/
+.DS_Store
+starweaver/node_modules/
+*.log
+.env
+.env.*

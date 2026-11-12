@@ -1,0 +1,17 @@
+{
+  "name": "starweaver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Starweaver — A standalone offline 3D exploration, crafting, and spacecraft repair game built with Three.js",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-standalone.mjs",
+    "verify": "node scripts/verify-data.mjs"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

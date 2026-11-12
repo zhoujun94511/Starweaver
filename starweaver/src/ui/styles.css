@@ -1,0 +1,1827 @@
+:root {
+  --bg-panel: rgba(14, 22, 36, 0.84);
+  --bg-panel-strong: rgba(12, 19, 32, 0.94);
+  --border-soft: rgba(116, 224, 255, 0.28);
+  --accent-cyan: #5ce8ff;
+  --accent-amber: #ffbe4d;
+  --accent-orange: #ff9238;
+  --accent-green: #52ffb8;
+  --accent-rose: #ff7597;
+  --text-main: #f2f7ff;
+  --text-dim: #b3c4dc;
+  --font-stack: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: #121824;
+  font-family: var(--font-stack);
+  color: var(--text-main);
+}
+
+#game-canvas {
+  display: block;
+  position: fixed;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  touch-action: none;
+}
+
+#hud-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.hud-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.36);
+  pointer-events: auto;
+}
+
+/* Top-Left Collapsible Mission & Side-Tasks Drawer */
+.hud-top-left {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  z-index: 16;
+}
+
+.left-drawer-body {
+  width: min(370px, 42vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drawer-pill-tab {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 99px;
+  background: rgba(12, 22, 38, 0.86);
+  border: 1px solid rgba(116, 224, 255, 0.45);
+  color: #f2f8ff;
+  font-size: 12px;
+  font-weight: 700;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.38);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.drawer-pill-tab:hover {
+  background: rgba(28, 52, 82, 0.92);
+  border-color: var(--accent-cyan);
+}
+
+.left-pill {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  border-radius: 12px;
+  padding: 6px 12px 7px;
+}
+
+.pill-tab-text {
+  white-space: nowrap;
+  color: var(--accent-amber);
+}
+
+.pill-mini-track {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+
+.pill-mini-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+}
+
+.mission-card {
+  padding: 12px 15px;
+}
+
+.mission-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.drawer-fold-chip {
+  background: rgba(92, 232, 255, 0.12);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(116, 224, 255, 0.38);
+  border-radius: 99px;
+  padding: 2px 9px;
+  height: 22px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.drawer-fold-chip:hover {
+  background: rgba(92, 232, 255, 0.26);
+}
+
+.level-header {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent-amber);
+}
+
+.mission-summary {
+  font-size: 12.5px;
+  line-height: 1.42;
+  color: var(--text-dim);
+  margin-bottom: 9px;
+}
+
+.progress-bar-track {
+  width: 100%;
+  height: 7px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+  transition: width 0.25s ease;
+}
+
+.step-list, .side-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.step-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12.5px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.step-row.done {
+  color: var(--accent-green);
+  background: rgba(82, 255, 184, 0.1);
+}
+
+.side-card {
+  padding: 10px 14px;
+}
+
+.section-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent-cyan);
+  margin-bottom: 6px;
+}
+
+.side-item {
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.side-item.done {
+  color: var(--accent-green);
+}
+
+.side-reward {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* Top-Center Dynamic Next-Step Guidance Compass */
+.hud-top-center {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-radius: 99px;
+  background: rgba(12, 22, 36, 0.9);
+  border: 1.5px solid var(--accent-cyan);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.42);
+  max-width: min(500px, 40vw);
+  pointer-events: auto;
+}
+
+.compass-badge {
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: rgba(92, 232, 255, 0.18);
+  color: var(--accent-cyan);
+  white-space: nowrap;
+}
+
+.compass-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compass-dist {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--accent-amber);
+  white-space: nowrap;
+}
+
+.compass-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.compass-close-btn:hover {
+  color: #ffffff;
+}
+
+/* Top-Right Global Ship Progress & Toolbar */
+.hud-top-right {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  z-index: 16;
+}
+
+.right-drawer-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.right-mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.mini-jet-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 99px;
+  background: rgba(12, 24, 42, 0.86);
+  border: 1px solid rgba(92, 232, 255, 0.5);
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--accent-cyan);
+}
+
+.mini-jet-track {
+  display: inline-block;
+  width: 48px;
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+
+.mini-jet-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #2ec4ff, #70ffdf);
+}
+
+.toolbar-row {
+  display: flex;
+  gap: 7px;
+  pointer-events: auto;
+}
+
+.hud-btn {
+  background: var(--bg-panel);
+  color: var(--text-main);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.hud-btn:hover:not(:disabled) {
+  background: rgba(45, 76, 112, 0.92);
+  border-color: var(--accent-cyan);
+  transform: translateY(-1px);
+}
+
+.hud-btn.primary {
+  background: linear-gradient(135deg, #1a8cb8, #19a87c);
+  border-color: #7df7ff;
+  color: #ffffff;
+}
+
+.hud-btn.amber-primary {
+  background: linear-gradient(135deg, #d96b18, #e89b25);
+  border-color: #ffd88a;
+  color: #ffffff;
+}
+
+.hud-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.ship-status-card {
+  padding: 11px 14px;
+  width: min(300px, 38vw);
+}
+
+.ship-header {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-bottom: 7px;
+}
+
+.ship-pills {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.ship-pill {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ship-pill.online {
+  background: rgba(82, 255, 184, 0.18);
+  color: var(--accent-green);
+  border-color: rgba(82, 255, 184, 0.5);
+}
+
+.gear-status-card {
+  padding: 10px 14px;
+  width: min(300px, 38vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gear-badges-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gear-chip {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: rgba(92, 232, 255, 0.15);
+  border: 1px solid rgba(92, 232, 255, 0.5);
+  color: #e8fbff;
+}
+
+.gear-chip.drill {
+  background: rgba(255, 176, 58, 0.18);
+  border-color: rgba(255, 190, 77, 0.6);
+  color: #ffe2a8;
+  cursor: pointer;
+}
+
+.gear-chip.drill:hover {
+  background: rgba(255, 176, 58, 0.32);
+}
+
+.jetpack-gauge-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jetpack-gauge-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+}
+
+.jetpack-bar-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.jetpack-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2ec4ff, #70ffdf);
+  transition: width 0.06s linear;
+}
+
+/* Bottom-Left Collapsible Cargo Drawer */
+.hud-bottom-left-wrap {
+  position: absolute;
+  bottom: 42px;
+  left: 14px;
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.hud-bottom-left-card {
+  width: min(410px, 45vw);
+  padding: 10px 13px;
+}
+
+.inv-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 118px;
+  overflow-y: auto;
+}
+
+.inv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 12px;
+}
+
+.inv-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.inv-count {
+  font-weight: 700;
+  color: var(--accent-amber);
+}
+
+/* Bottom-Center Prompts, Hints & Control Bar */
+.hud-bottom-center {
+  position: absolute;
+  bottom: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.interact-prompt {
+  padding: 9px 18px;
+  border-radius: 99px;
+  background: rgba(12, 24, 40, 0.92);
+  border: 1.5px solid var(--accent-cyan);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
+
+.inspect-subprompt {
+  font-size: 11.5px;
+  color: var(--accent-cyan);
+  margin-top: 2px;
+}
+
+.toast-banner {
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  background: rgba(18, 36, 54, 0.94);
+  border: 1px solid var(--accent-cyan);
+  transition: opacity 0.25s;
+}
+
+.toast-banner.celebrate {
+  border-color: var(--accent-green);
+  color: var(--accent-green);
+}
+
+.toast-banner.warn {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+
+.hint-banner {
+  max-width: 540px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #fff4d6;
+  border-color: var(--accent-amber);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.controls-footer {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 96vw;
+  padding: 5px 14px;
+  border-radius: 99px;
+  background: rgba(10, 16, 26, 0.76);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* ==========================================================================
+   CINEMATIC INTRO LETTERBOX & NARRATIVE SUBTITLES
+   ========================================================================== */
+.cinema-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.cinema-bar-top {
+  height: 11vh;
+  background: linear-gradient(180deg, rgba(5, 8, 15, 0.96) 65%, rgba(5, 8, 15, 0));
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 28px;
+}
+
+.cinema-skip-btn {
+  pointer-events: auto;
+  background: rgba(20, 32, 50, 0.85);
+  border: 1px solid rgba(130, 220, 255, 0.45);
+  color: #e8f4ff;
+  border-radius: 99px;
+  padding: 7px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cinema-skip-btn:hover {
+  background: rgba(38, 66, 98, 0.95);
+  border-color: var(--accent-cyan);
+}
+
+.cinema-bar-bottom {
+  min-height: 15vh;
+  background: linear-gradient(0deg, rgba(5, 8, 15, 0.96) 72%, rgba(5, 8, 15, 0));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 32px 24px;
+  gap: 10px;
+}
+
+.cinema-subtitle {
+  max-width: 780px;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1.6;
+  font-weight: 600;
+  color: #f7fbff;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+  letter-spacing: 0.02em;
+}
+
+.cinema-dots {
+  display: flex;
+  gap: 8px;
+}
+
+.cinema-dot {
+  width: 24px;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.22);
+  transition: background 0.3s, width 0.3s;
+}
+
+.cinema-dot.active {
+  width: 40px;
+  background: var(--accent-amber);
+}
+
+/* ==========================================================================
+   DIEGETIC HOLOGRAPHIC WORKBENCH & PORTABLE BLUEPRINT PAD (SCI-FI HUD)
+   ========================================================================== */
+.workbench-drawer {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  bottom: 52px;
+  width: min(490px, 44vw);
+  z-index: 30;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Chamfered sci-fi holographic terminal corners + subtle 3D perspective tilt toward the machine! */
+  clip-path: polygon(
+    0 18px,
+    18px 0,
+    calc(100% - 18px) 0,
+    100% 18px,
+    100% calc(100% - 18px),
+    calc(100% - 18px) 100%,
+    18px 100%,
+    0 calc(100% - 18px)
+  );
+  backdrop-filter: blur(10px);
+  transform: perspective(1200px) rotateY(-4deg);
+  transform-origin: right center;
+  animation: drawerSlideIn 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes drawerSlideIn {
+  from {
+    opacity: 0;
+    transform: perspective(1200px) rotateY(-12deg) translateX(34px);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(1200px) rotateY(-4deg) translateX(0);
+  }
+}
+
+/* Holographic scanline overlay across all workbenches */
+.workbench-drawer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.022) 0px,
+    rgba(255, 255, 255, 0.022) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+  z-index: 2;
+}
+
+/* 1. Solar Smelting Furnace Skin — Translucent Molten Amber Thermal Display */
+.workbench-drawer.theme-furnace {
+  background:
+    radial-gradient(circle at 85% 6%, rgba(255, 138, 36, 0.28), transparent 48%),
+    linear-gradient(165deg, rgba(36, 20, 12, 0.78), rgba(20, 12, 10, 0.84));
+  border: 2px solid rgba(255, 166, 68, 0.72);
+  box-shadow:
+    inset 0 0 28px rgba(255, 128, 24, 0.18),
+    -12px 16px 42px rgba(0, 0, 0, 0.45);
+}
+
+/* 2. Precision Fabrication Station Skin — Translucent Cyan Laser CAD Hologram */
+.workbench-drawer.theme-fabricator {
+  background:
+    linear-gradient(rgba(92, 232, 255, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(92, 232, 255, 0.055) 1px, transparent 1px),
+    linear-gradient(165deg, rgba(10, 28, 46, 0.76), rgba(7, 18, 32, 0.82));
+  background-size: 20px 20px, 20px 20px, 100% 100%;
+  border: 2px solid rgba(92, 232, 255, 0.72);
+  box-shadow:
+    inset 0 0 28px rgba(42, 198, 255, 0.18),
+    -12px 16px 42px rgba(0, 0, 0, 0.45);
+}
+
+/* 3. Outpost Field Workbench Skin — Translucent Bio-Emerald Field Scanner */
+.workbench-drawer.theme-outpost {
+  background:
+    radial-gradient(circle at 85% 10%, rgba(82, 255, 184, 0.22), transparent 48%),
+    linear-gradient(165deg, rgba(10, 32, 28, 0.78), rgba(8, 20, 22, 0.84));
+  border: 2px solid rgba(82, 255, 184, 0.68);
+  box-shadow:
+    inset 0 0 28px rgba(52, 235, 160, 0.16),
+    -12px 16px 42px rgba(0, 0, 0, 0.45);
+}
+
+/* 4. Milo's Portable Blueprint Pad [C] — Floating Wrist/Visor Data-Slate */
+.workbench-drawer.theme-handbook {
+  top: 56px;
+  bottom: 64px;
+  right: 50%;
+  transform: translateX(50%);
+  width: min(650px, 88vw);
+  animation: padPopIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  background:
+    linear-gradient(rgba(130, 210, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(130, 210, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(170deg, rgba(12, 24, 42, 0.82), rgba(9, 17, 30, 0.88));
+  background-size: 24px 24px, 24px 24px, 100% 100%;
+  border: 2px solid rgba(132, 218, 255, 0.68);
+  box-shadow:
+    inset 0 0 32px rgba(82, 195, 255, 0.16),
+    0 20px 52px rgba(0, 0, 0, 0.52);
+}
+
+@keyframes padPopIn {
+  from {
+    opacity: 0;
+    transform: translateX(50%) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(50%) scale(1);
+  }
+}
+
+.wb-header {
+  padding: 16px 20px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.wb-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wb-emblem {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  flex-shrink: 0;
+}
+
+.theme-furnace .wb-emblem {
+  background: rgba(255, 146, 56, 0.2);
+  border-color: rgba(255, 174, 82, 0.55);
+}
+
+.theme-fabricator .wb-emblem {
+  background: rgba(92, 232, 255, 0.16);
+  border-color: rgba(92, 232, 255, 0.5);
+}
+
+.theme-outpost .wb-emblem {
+  background: rgba(82, 255, 184, 0.16);
+  border-color: rgba(82, 255, 184, 0.5);
+}
+
+.wb-title {
+  font-size: 18px;
+  font-weight: 800;
+  color: #ffffff;
+}
+
+.theme-furnace .wb-title { color: #ffca7a; }
+.theme-fabricator .wb-title { color: #78efff; }
+.theme-outpost .wb-title { color: #6effc4; }
+
+.wb-subtitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-top: 3px;
+}
+
+.wb-controls-bar {
+  padding: 10px 20px 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wb-queue-strip {
+  margin: 10px 20px 4px;
+  padding: 9px 13px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.theme-furnace .wb-queue-strip .progress-bar-fill {
+  background: linear-gradient(90deg, #ff7b24, #ffd25a);
+}
+
+.wb-scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+/* Tactile Schematic Recipe Card */
+.schematic-card {
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.18s, background 0.18s;
+}
+
+.theme-furnace .schematic-card.ready {
+  background: rgba(255, 146, 56, 0.09);
+  border-color: rgba(255, 174, 76, 0.55);
+}
+
+.theme-fabricator .schematic-card.ready,
+.theme-outpost .schematic-card.ready,
+.theme-handbook .schematic-card.ready {
+  background: rgba(92, 232, 255, 0.08);
+  border-color: rgba(92, 232, 255, 0.5);
+}
+
+.schematic-card.locked {
+  opacity: 0.56;
+}
+
+.schematic-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.schematic-out-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mat-icon-canvas {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  flex-shrink: 0;
+}
+
+.mat-icon-canvas.small {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+}
+
+.schematic-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.schematic-cat-badge {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 99px;
+  margin-top: 2px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-dim);
+}
+
+.schematic-cat-badge.core {
+  background: rgba(255, 190, 77, 0.22);
+  color: #ffd875;
+  border: 1px solid rgba(255, 190, 77, 0.45);
+}
+
+/* Visual Input -> Process Arrow -> Output Flow Row */
+.schematic-flow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.schematic-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ing-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 12px;
+}
+
+.ing-pill.enough {
+  border-color: rgba(82, 255, 184, 0.45);
+  color: #e8fff5;
+}
+
+.ing-pill.short {
+  border-color: rgba(255, 170, 76, 0.45);
+  color: #ffd49e;
+}
+
+.ing-qty {
+  font-weight: 800;
+  font-size: 11.5px;
+}
+
+.ing-pill.enough .ing-qty { color: var(--accent-green); }
+.ing-pill.short .ing-qty { color: var(--accent-amber); }
+
+.flow-arrow {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+
+.recipe-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.schematic-footer {
+  font-size: 11.5px;
+  color: var(--accent-amber);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.station-loc-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 99px;
+  background: rgba(92, 232, 255, 0.14);
+  border: 1px solid rgba(92, 232, 255, 0.35);
+  color: var(--accent-cyan);
+}
+
+/* ==========================================================================
+   MODALS & CLEAN TITLE OVERLAY
+   ========================================================================== */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 11, 20, 0.66);
+  backdrop-filter: blur(5px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  pointer-events: auto;
+}
+
+/* Clean, unblurred scenic backdrop specifically for the Title Screen! */
+.modal-backdrop.title-mode {
+  background: radial-gradient(circle at 50% 62%, rgba(8, 14, 24, 0.18), rgba(6, 10, 18, 0.72));
+  backdrop-filter: none;
+  align-items: flex-end;
+  padding-bottom: 9vh;
+}
+
+.modal-panel {
+  background: var(--bg-panel-strong);
+  border: 1.5px solid var(--border-soft);
+  border-radius: 20px;
+  padding: 24px 28px;
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.modal-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--accent-cyan);
+}
+
+.station-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.queue-box {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 10px 13px;
+  margin-bottom: 14px;
+}
+
+.recipe-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.recipe-io {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.recipe-missing {
+  font-size: 12px;
+  color: var(--accent-amber);
+  margin-top: 4px;
+}
+
+.hero-panel {
+  text-align: center;
+  max-width: 580px;
+}
+
+.hero-title {
+  font-size: 30px;
+  font-weight: 800;
+  color: #ffffff;
+  margin-bottom: 8px;
+  letter-spacing: 0.01em;
+}
+
+.hero-sub {
+  font-size: 14.5px;
+  line-height: 1.58;
+  color: var(--text-dim);
+  margin-bottom: 20px;
+}
+
+.hero-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin: 16px 0 22px;
+  text-align: left;
+}
+
+.stat-box {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 10px 13px;
+}
+
+.stat-val {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--accent-green);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ==========================================================================
+   MULTI-SCREEN RESPONSIVE BREAKPOINTS (Large 2K/4K • Medium Laptop • Small)
+   ========================================================================== */
+
+/* 1. Large / 2K / Ultrawide Screens (>= 1920px) */
+@media (min-width: 1920px) {
+  .left-drawer-body {
+    width: 395px;
+  }
+  .hud-top-center {
+    max-width: 580px;
+    padding: 9px 20px;
+  }
+  .compass-text {
+    font-size: 14px;
+  }
+  .ship-status-card,
+  .gear-status-card {
+    width: 325px;
+  }
+  .workbench-drawer {
+    width: 530px;
+  }
+}
+
+/* 2. Medium Screens / 13"–14" Laptops (<= 1440px) */
+@media (max-width: 1440px) {
+  .left-drawer-body {
+    width: min(315px, 34vw);
+    gap: 8px;
+  }
+  .mission-card {
+    padding: 10px 12px;
+  }
+  .level-header {
+    font-size: 14px;
+  }
+  .mission-summary {
+    font-size: 11.5px;
+    margin-bottom: 7px;
+  }
+  .step-row,
+  .side-item {
+    font-size: 11.5px;
+  }
+  .hud-top-center {
+    left: 46%;
+    max-width: min(360px, 30vw);
+    padding: 6px 12px;
+    gap: 6px;
+  }
+  .compass-text {
+    font-size: 12px;
+  }
+  .hud-btn {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+  .toolbar-row {
+    gap: 5px;
+  }
+  .ship-status-card,
+  .gear-status-card {
+    width: min(268px, 31vw);
+    padding: 9px 12px;
+  }
+  .hud-bottom-left-card {
+    width: min(335px, 36vw);
+    padding: 8px 11px;
+  }
+  .workbench-drawer {
+    width: min(465px, 48vw);
+  }
+}
+
+/* 3. Compact / Tablet / Split-Window Screens (<= 1180px)
+      Trim secondary desktop toolbar buttons (moved to Settings) & make expanded drawers float cleanly! */
+@media (max-width: 1180px) {
+  .desktop-only-btn {
+    display: none !important;
+  }
+  .hud-top-left {
+    top: 10px;
+    left: 10px;
+    z-index: 25;
+  }
+  .left-drawer-body {
+    width: min(310px, 46vw);
+    max-height: calc(100vh - 130px);
+    overflow-y: auto;
+  }
+  .mission-summary {
+    display: none;
+  }
+  .hud-top-center {
+    top: 10px;
+    left: 48%;
+    transform: translateX(-50%);
+    max-width: min(380px, 38vw);
+    z-index: 14;
+  }
+  .hud-top-right {
+    top: 10px;
+    right: 10px;
+    gap: 6px;
+    z-index: 24;
+  }
+  .ship-status-card,
+  .gear-status-card {
+    width: min(255px, 40vw);
+  }
+  .hud-bottom-left-wrap {
+    left: 10px;
+    bottom: 38px;
+    z-index: 24;
+  }
+  .hud-bottom-left-card {
+    width: min(295px, 44vw);
+  }
+  .inv-grid {
+    max-height: 82px;
+  }
+  .controls-footer {
+    font-size: 10.5px;
+    padding: 4px 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .workbench-drawer {
+    top: 14px;
+    right: 14px;
+    bottom: 42px;
+    width: min(445px, 56vw);
+    transform: none;
+  }
+}
+
+/* 4. Small Screens / Narrow Windows (<= 820px) */
+@media (max-width: 820px) {
+  .hud-top-left {
+    top: 8px;
+    left: 8px;
+  }
+  .left-drawer-body {
+    width: min(295px, 78vw);
+    max-height: 58vh;
+  }
+  .hud-top-right {
+    top: 8px;
+    right: 8px;
+    left: auto;
+    align-items: flex-end;
+  }
+  .ship-status-card,
+  .gear-status-card {
+    padding: 8px 11px;
+    width: min(250px, 68vw);
+  }
+  .hud-top-center {
+    top: 48px;
+    left: 50%;
+    right: auto;
+    bottom: auto;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 20px);
+    padding: 5px 11px;
+  }
+  .compass-badge {
+    display: none;
+  }
+  .hud-bottom-left-wrap {
+    bottom: 10px;
+    left: 8px;
+  }
+  .hud-bottom-left-card {
+    width: min(280px, 76vw);
+    padding: 8px 10px;
+  }
+  .inv-grid {
+    max-height: 76px;
+  }
+  .hud-bottom-center {
+    bottom: 48px;
+    width: 92vw;
+  }
+  .interact-prompt {
+    font-size: 12.5px;
+    padding: 7px 13px;
+  }
+  .controls-footer {
+    display: none;
+  }
+
+  /* Bottom-sheet / full-width clean drawer on small viewports */
+  .workbench-drawer,
+  .workbench-drawer.theme-handbook {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    height: min(68vh, 520px);
+    transform: none;
+    animation: none;
+  }
+  .wb-header {
+    padding: 12px 14px 10px;
+  }
+  .wb-title {
+    font-size: 15.5px;
+  }
+  .wb-scroll-body {
+    padding: 8px 14px 14px;
+  }
+  .schematic-top {
+    flex-wrap: wrap;
+  }
+
+  .modal-panel {
+    padding: 18px 16px;
+    width: 94vw;
+  }
+  .hero-title {
+    font-size: 22px;
+  }
+  .hero-sub {
+    font-size: 13px;
+  }
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+  .cinema-subtitle {
+    font-size: 13.5px;
+  }
+}
+
+/* 5. Short-Height Landscape Viewports (max-height <= 740px) */
+@media (max-height: 740px) {
+  .left-drawer-body {
+    max-height: calc(100vh - 150px);
+    overflow-y: auto;
+    gap: 6px;
+  }
+  .mission-summary {
+    display: none;
+  }
+  .side-card {
+    padding: 7px 11px;
+  }
+  .inv-grid {
+    max-height: 68px;
+  }
+  .workbench-drawer {
+    top: 10px;
+    bottom: 36px;
+  }
+}
+
+/* Smooth native touch scrolling inside scrollable panels & drawers */
+.wb-scroll-body,
+.modal-panel,
+.inv-grid,
+.left-drawer-body {
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ==========================================================================
+   MOBILE & TABLET MULTI-TOUCH CONTROLS (Auto-shown ONLY when touch-active!)
+   ========================================================================== */
+.touch-controls-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 22;
+  pointer-events: none;
+}
+
+.touch-joy-zone {
+  position: absolute;
+  left: max(16px, env(safe-area-inset-left, 16px));
+  bottom: max(18px, env(safe-area-inset-bottom, 18px));
+  width: 138px;
+  height: 138px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.touch-joy-base {
+  width: 116px;
+  height: 116px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(20, 36, 58, 0.55) 0%, rgba(10, 18, 30, 0.78) 100%);
+  border: 2px solid rgba(92, 232, 255, 0.42);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.touch-joy-base.active {
+  border-color: var(--accent-cyan);
+  background: radial-gradient(circle, rgba(32, 62, 96, 0.65) 0%, rgba(12, 22, 38, 0.86) 100%);
+}
+
+.touch-joy-knob {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #9af5ff, #2ca8d9);
+  border: 2px solid #e6fcff;
+  box-shadow: 0 4px 14px rgba(44, 188, 255, 0.55);
+  will-change: transform;
+}
+
+.touch-action-cluster {
+  position: absolute;
+  right: max(16px, env(safe-area-inset-right, 16px));
+  bottom: max(18px, env(safe-area-inset-bottom, 18px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.touch-sub-row,
+.touch-main-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.touch-pad-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 50%;
+  border: 2px solid rgba(116, 224, 255, 0.45);
+  background: rgba(14, 24, 40, 0.84);
+  color: #f2f8ff;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  touch-action: none;
+  padding: 0;
+  transition: transform 0.08s, border-color 0.15s, background 0.15s;
+}
+
+.touch-pad-btn:active {
+  transform: scale(0.93);
+}
+
+.touch-pad-btn.primary-act {
+  width: 78px;
+  height: 78px;
+}
+
+.touch-pad-btn.primary-act.idle {
+  opacity: 0.72;
+  border-color: rgba(160, 195, 225, 0.35);
+}
+
+.touch-pad-btn.primary-act.ready {
+  opacity: 1;
+  background: linear-gradient(145deg, rgba(22, 138, 178, 0.92), rgba(20, 168, 122, 0.92));
+  border-color: #9effe0;
+  box-shadow: 0 0 22px rgba(82, 255, 184, 0.45);
+}
+
+.touch-pad-btn.jet {
+  width: 68px;
+  height: 68px;
+  background: rgba(16, 42, 68, 0.88);
+  border-color: rgba(92, 232, 255, 0.68);
+}
+
+.touch-pad-btn.jet.held {
+  transform: scale(0.92);
+  background: linear-gradient(145deg, #1ca6e8, #4ef5d2);
+  color: #061524;
+  border-color: #ffffff;
+  box-shadow: 0 0 24px rgba(92, 232, 255, 0.75);
+}
+
+.touch-pad-btn.sonar,
+.touch-pad-btn.sub {
+  width: 54px;
+  height: 54px;
+}
+
+.touch-pad-btn.sonar {
+  border-color: rgba(255, 190, 77, 0.68);
+  background: rgba(42, 28, 14, 0.86);
+}
+
+.touch-btn-icon {
+  font-size: 21px;
+  line-height: 1;
+}
+
+.touch-pad-btn.sonar .touch-btn-icon,
+.touch-pad-btn.sub .touch-btn-icon {
+  font-size: 16px;
+}
+
+.touch-btn-lbl {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+/* When touch controls are active, clear bottom corners & secondary toolbar clutter! */
+body.touch-active .controls-footer,
+body.touch-active .desktop-only-btn {
+  display: none !important;
+}
+
+body.touch-active .hud-bottom-left-wrap {
+  bottom: 162px;
+  left: max(12px, env(safe-area-inset-left, 12px));
+}
+
+body.touch-active .hud-bottom-left-card {
+  width: min(265px, 68vw);
+  padding: 8px 10px;
+}
+
+body.touch-active .inv-grid {
+  max-height: 68px;
+}
+
+body.touch-active .hud-bottom-center {
+  bottom: 108px;
+  max-width: min(420px, 56vw);
+}
+
+/* Portrait Smartphone & Small Landscape Mobile Ergonomics */
+@media (max-width: 620px) {
+  .hud-top-right {
+    top: max(8px, env(safe-area-inset-top, 8px));
+    right: max(8px, env(safe-area-inset-right, 8px));
+    gap: 5px;
+  }
+  .hud-btn {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+  .drawer-pill-tab {
+    padding: 5px 10px;
+    font-size: 11.5px;
+  }
+  .hud-top-left {
+    top: max(8px, env(safe-area-inset-top, 8px));
+    left: max(8px, env(safe-area-inset-left, 8px));
+  }
+  .left-drawer-body {
+    width: min(285px, 84vw);
+    max-height: 54vh;
+  }
+  .level-header {
+    font-size: 13px;
+  }
+  .step-row {
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+  .ship-status-card,
+  .gear-status-card {
+    width: min(240px, 76vw);
+    padding: 8px 10px;
+  }
+  body.touch-active .hud-bottom-left-wrap {
+    bottom: 146px;
+  }
+  .hud-top-center {
+    top: 76px;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 16px);
+  }
+  .touch-joy-zone {
+    width: 120px;
+    height: 120px;
+  }
+  .touch-joy-base {
+    width: 102px;
+    height: 102px;
+  }
+  .touch-pad-btn.primary-act {
+    width: 70px;
+    height: 70px;
+  }
+  .touch-pad-btn.jet {
+    width: 60px;
+    height: 60px;
+  }
+}
+
+/* Short Landscape Smartphone (e.g. iPhone 844x390 / 932x430) */
+@media (max-height: 500px) {
+  .hud-top-left {
+    top: 8px;
+    left: max(12px, env(safe-area-inset-left, 12px));
+  }
+  .left-drawer-body {
+    width: min(285px, 46vw);
+    max-height: 62vh;
+  }
+  .hud-top-right {
+    top: 8px;
+    right: max(12px, env(safe-area-inset-right, 12px));
+    gap: 5px;
+  }
+  .ship-status-card,
+  .gear-status-card {
+    padding: 7px 10px;
+    width: min(240px, 38vw);
+  }
+  body.touch-active .hud-bottom-left-wrap {
+    bottom: 132px;
+    left: max(12px, env(safe-area-inset-left, 12px));
+  }
+  body.touch-active .hud-top-center {
+    top: 8px;
+    bottom: auto;
+    left: 46%;
+    right: auto;
+    transform: translateX(-50%);
+    max-width: min(330px, 38vw);
+    padding: 5px 10px;
+  }
+  .compass-badge {
+    display: none;
+  }
+  body.touch-active .hud-bottom-center {
+    bottom: 14px;
+    max-width: min(360px, 44vw);
+  }
+  .touch-joy-zone {
+    width: 112px;
+    height: 112px;
+    bottom: 10px;
+  }
+  .touch-joy-base {
+    width: 96px;
+    height: 96px;
+  }
+  .touch-action-cluster {
+    bottom: 10px;
+    gap: 6px;
+  }
+  .touch-pad-btn.primary-act {
+    width: 64px;
+    height: 64px;
+  }
+  .touch-pad-btn.jet {
+    width: 56px;
+    height: 56px;
+  }
+  .touch-pad-btn.sonar,
+  .touch-pad-btn.sub {
+    width: 46px;
+    height: 46px;
+  }
+  .workbench-drawer,
+  .workbench-drawer.theme-handbook {
+    top: 8px;
+    bottom: 8px;
+    right: max(12px, env(safe-area-inset-right, 12px));
+    left: auto;
+    width: min(460px, 58vw);
+    height: auto;
+  }
+}
+
+/* ============================================================================
+   Mobile Compositor Thermal Optimization:
+   Eliminate expensive per-frame WebGL Canvas readback + Gaussian backdrop-filter blur
+   on touch / mobile WebKit & Blink compositors; replace with high-contrast deep translucent panels!
+   ============================================================================ */
+@media (pointer: coarse), (hover: none) {
+  .hud-card,
+  .drawer-pill-tab,
+  .mini-jet-pill,
+  .workbench-drawer,
+  .modal-backdrop,
+  .touch-pad-btn {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  .hud-card {
+    background: rgba(12, 20, 34, 0.92);
+  }
+
+  .drawer-pill-tab,
+  .mini-jet-pill {
+    background: rgba(11, 21, 36, 0.93);
+  }
+
+  .touch-pad-btn {
+    background: rgba(13, 24, 40, 0.91);
+  }
+
+  .workbench-drawer.theme-furnace {
+    background:
+      radial-gradient(circle at 85% 6%, rgba(255, 138, 36, 0.28), transparent 48%),
+      linear-gradient(165deg, rgba(34, 19, 12, 0.94), rgba(18, 11, 9, 0.96));
+  }
+
+  .workbench-drawer.theme-fabricator {
+    background:
+      linear-gradient(rgba(92, 232, 255, 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(92, 232, 255, 0.055) 1px, transparent 1px),
+      linear-gradient(165deg, rgba(10, 27, 45, 0.94), rgba(7, 17, 30, 0.96));
+    background-size: 20px 20px, 20px 20px, 100% 100%;
+  }
+
+  .workbench-drawer.theme-outpost {
+    background:
+      radial-gradient(circle at 85% 10%, rgba(82, 255, 184, 0.22), transparent 48%),
+      linear-gradient(165deg, rgba(10, 31, 27, 0.94), rgba(8, 19, 21, 0.96));
+  }
+}
