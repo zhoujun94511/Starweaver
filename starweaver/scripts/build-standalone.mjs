@@ -59,6 +59,9 @@ async function buildStandalone() {
 `;
 
   fs.writeFileSync(outHtmlPath, html, 'utf8');
+  const pagesDir = path.join(rootDir, '..', 'docs');
+  fs.mkdirSync(pagesDir, { recursive: true });
+  fs.copyFileSync(outHtmlPath, path.join(pagesDir, 'index.html'));
   const stat = fs.statSync(outHtmlPath);
   const mb = (stat.size / (1024 * 1024)).toFixed(3);
   console.log(`Built standalone HTML: ${outHtmlPath}`);
