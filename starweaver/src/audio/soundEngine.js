@@ -142,6 +142,21 @@ export class SoundEngine {
     }
   }
 
+  setWeatherIntensity(sandstormWeight = 0, overcastWeight = 0) {
+    if (!this.ctx || this.muted || this.ctx.state !== 'running') return;
+    const now = this.ctx.currentTime;
+    const storm = Math.max(0, Math.min(1, sandstormWeight));
+    const over = Math.max(0, Math.min(1, overcastWeight));
+    if (this.windGain) {
+      const targetGain = 0.062 + over * 0.025 + storm * 0.145;
+      this.windGain.gain.setTargetAtTime(targetGain, now, 0.25);
+    }
+    if (this.windFilter) {
+      const targetFreq = 250 + over * 65 + storm * 340;
+      this.windFilter.frequency.setTargetAtTime(targetFreq, now, 0.25);
+    }
+  }
+
   /**
    * Updates continuous spatial audio cues & occasional calm pentatonic starlight notes.
    */

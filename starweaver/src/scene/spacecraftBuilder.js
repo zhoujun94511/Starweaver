@@ -2,18 +2,22 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { PREFLIGHT_CHECKS, REPAIR_TARGETS } from '../data/gameData.js';
 import {
+  createHullRegistryDecalTexture,
+  createIndustrialSpecPlateTexture,
   createMetalHullPBR,
   createScorchDecalTexture,
   createVisorCanvas
 } from '../graphics/textures.js';
+import { applyWorldWeathering } from '../graphics/gpuMaterialBaker.js';
 import { getTerrainHeight, lerp, clamp, smoothstep } from '../utils/math.js';
 
 export class SpacecraftBuilder {
-  constructor(scene, state, environments = null, skyDome = null) {
+  constructor(scene, state, environments = null, skyDome = null, pbrLibrary = null) {
     this.scene = scene;
     this.state = state;
     this.environments = environments;
     this.skyDome = skyDome;
+    this.pbrLibrary = pbrLibrary;
 
     this.group = new THREE.Group();
     this.group.name = 'spacecraft';
@@ -30,7 +34,7 @@ export class SpacecraftBuilder {
     this.hullPivot = new THREE.Group();
     this.group.add(this.hullPivot);
 
-    this.hullPBR = createMetalHullPBR(256);
+    this.hullPBR = this.pbrLibrary ? this.pbrLibrary.hull_white : createMetalHullPBR(256);
     this.repairMarkers = new Map();
     this.preflightMeshes = new Map();
     this.signalRings = [];
@@ -50,10 +54,33 @@ export class SpacecraftBuilder {
   }
 
   getColliders() {
+    const shipVis = () => this.group.visible;
+    const rampVis = () => this.group.visible && this.boardingRamp && this.boardingRamp.visible;
     return [
-      { id: 'ship_aft', x: 0, z: -3.9, radius: 2.55, activeFn: () => this.group.visible },
-      { id: 'ship_mid', x: 0, z: 0.0, radius: 2.75, activeFn: () => this.group.visible },
-      { id: 'ship_fwd', x: 0, z: 3.7, radius: 2.35, activeFn: () => this.group.visible }
+      // Main fuselage spine + aft twin thruster bells + tapered nose cone (occludes camera too)
+      { id: 'ship_thrusters', x: 0, z: -5.05, radius: 1.92, maxY: 4.4, occluder: true, activeFn: shipVis },
+      { id: 'ship_aft', x: 0, z: -3.35, radius: 2.52, maxY: 4.6, occluder: true, activeFn: shipVis },
+      { id: 'ship_mid', x: 0, z: 0.0, radius: 2.68, maxY: 4.8, occluder: true, activeFn: shipVis },
+      { id: 'ship_fwd', x: 0, z: 3.35, radius: 2.32, maxY: 4.4, occluder: true, activeFn: shipVis },
+      { id: 'ship_nose', x: 0, z: 5.75, radius: 1.42, maxY: 3.6, occluder: true, activeFn: shipVis },
+
+      // Swept delta wings (port & starboard) + wingtip RCS pods — height-capped at y=2.38 so jetpack can fly over,
+      // and marked as thickness-aware camera occluders (occluderMinY..maxY) so camera never clips through wings!
+      { id: 'ship_wing_l_in', x: -2.45, z: -1.15, radius: 1.48, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_wing_l_out', x: -3.65, z: -1.82, radius: 1.05, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_pod_l_fwd', x: -4.48, z: -0.92, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_pod_l_aft', x: -4.48, z: -2.18, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+
+      { id: 'ship_wing_r_in', x: 2.45, z: -1.15, radius: 1.48, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_wing_r_out', x: 3.65, z: -1.82, radius: 1.05, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_pod_r_fwd', x: 4.48, z: -0.92, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_pod_r_aft', x: 4.48, z: -2.18, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+
+      // Extended boarding ramp side guard + outer sand berm colliders
+      { id: 'ship_berm_l', x: -4.9, z: -4.6, radius: 1.05, maxY: 1.2 },
+      { id: 'ship_berm_r', x: 4.9, z: -4.6, radius: 1.05, maxY: 1.2 },
+      { id: 'ship_berm_fwd', x: 0.0, z: 8.35, radius: 1.15, maxY: 1.2 },
+      { id: 'ship_ramp_mid', x: 2.85, z: 1.5, radius: 0.85, maxY: 1.8, activeFn: rampVis }
     ];
   }
 
@@ -73,21 +100,23 @@ export class SpacecraftBuilder {
     scorchMesh.position.set(-0.2, 0.04, -3.2);
     this.crashSiteDecals.add(scorchMesh);
 
-    // Plowed sand berms pushed up along both flanks of the hull
+    // Plowed sand berms pushed out beyond the tail skid trail (flush low profile + collider-safe placement)
     const bermMat = new THREE.MeshStandardMaterial({
+      map: this.pbrLibrary ? this.pbrLibrary.sand.map : null,
+      normalMap: this.pbrLibrary ? this.pbrLibrary.sand.normalMap : null,
       color: '#cf9363',
       roughness: 0.94,
       metalness: 0.02
     });
     for (const [bx, bz, sx, sz, rotY] of [
-      [-3.5, 1.4, 1.1, 4.2, 0.18],
-      [3.6, 1.2, 1.0, 3.8, -0.16],
-      [0.2, 7.6, 2.8, 1.1, 0.05]
+      [-4.9, -4.6, 1.15, 2.6, 0.22],
+      [4.9, -4.6, 1.15, 2.6, -0.22],
+      [0.0, 8.35, 2.2, 0.95, 0.04]
     ]) {
-      const berm = new THREE.Mesh(new THREE.SphereGeometry(0.68, 14, 10), bermMat);
-      berm.scale.set(sx, 0.38, sz);
+      const berm = new THREE.Mesh(new THREE.SphereGeometry(0.62, 16, 12), bermMat);
+      berm.scale.set(sx, 0.22, sz);
       const by = getTerrainHeight(bx, bz, false) - this.baseGroundY;
-      berm.position.set(bx, by + 0.05, bz);
+      berm.position.set(bx, by - 0.03, bz);
       berm.rotation.y = rotY;
       berm.receiveShadow = true;
       this.crashSiteDecals.add(berm);
@@ -95,29 +124,61 @@ export class SpacecraftBuilder {
   }
 
   _buildShipHull() {
-    const hullMat = new THREE.MeshStandardMaterial({
-      map: this.hullPBR.map,
-      normalMap: this.hullPBR.normalMap,
-      normalScale: new THREE.Vector2(0.55, 0.55),
-      color: '#eef3fa',
-      roughness: 0.3,
-      metalness: 0.62
-    });
-    const darkTitaniumMat = new THREE.MeshStandardMaterial({
-      color: '#2b3648',
-      roughness: 0.42,
-      metalness: 0.72
-    });
-    const accentMat = new THREE.MeshStandardMaterial({
-      color: '#eb7d3c',
-      roughness: 0.34,
-      metalness: 0.38
-    });
+    const lib = this.pbrLibrary;
+    const hullMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: this.hullPBR.map,
+        aoMap: this.hullPBR.ormMap || null,
+        aoMapIntensity: 0.95,
+        roughnessMap: this.hullPBR.ormMap || null,
+        metalnessMap: this.hullPBR.ormMap || null,
+        normalMap: this.hullPBR.normalMap,
+        normalScale: new THREE.Vector2(0.85, 0.85),
+        color: '#f4f8fd',
+        roughness: this.hullPBR.ormMap ? 1.0 : 0.3,
+        metalness: this.hullPBR.ormMap ? 1.0 : 0.62
+      }),
+      { dustAmount: 0.14, macroContrast: 0.09, groundSkirt: 0.28, keyTag: 'ship_hull_v2' }
+    );
+    const darkTitaniumMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: lib ? lib.titanium_dark.map : null,
+        aoMap: lib ? lib.titanium_dark.ormMap : null,
+        roughnessMap: lib ? lib.titanium_dark.ormMap : null,
+        metalnessMap: lib ? lib.titanium_dark.ormMap : null,
+        normalMap: lib ? lib.titanium_dark.normalMap : null,
+        normalScale: new THREE.Vector2(0.75, 0.75),
+        color: lib ? '#ffffff' : '#2b3648',
+        roughness: lib ? 1.0 : 0.42,
+        metalness: lib ? 1.0 : 0.72
+      }),
+      { dustAmount: 0.16, macroContrast: 0.08, groundSkirt: 0.32, keyTag: 'ship_tit_v2' }
+    );
+    const accentMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: lib ? lib.painted_orange.map : null,
+        aoMap: lib ? lib.painted_orange.ormMap : null,
+        roughnessMap: lib ? lib.painted_orange.ormMap : null,
+        metalnessMap: lib ? lib.painted_orange.ormMap : null,
+        normalMap: lib ? lib.painted_orange.normalMap : null,
+        normalScale: new THREE.Vector2(0.7, 0.7),
+        color: lib ? '#ffffff' : '#eb7d3c',
+        roughness: lib ? 1.0 : 0.34,
+        metalness: lib ? 1.0 : 0.38
+      }),
+      { dustAmount: 0.12, macroContrast: 0.08, groundSkirt: 0.2, keyTag: 'ship_orange_v2' }
+    );
     const copperMat = new THREE.MeshStandardMaterial({
-      color: '#d98448',
-      roughness: 0.28,
-      metalness: 0.82
+      map: lib ? lib.brushed_copper.map : null,
+      aoMap: lib ? lib.brushed_copper.ormMap : null,
+      roughnessMap: lib ? lib.brushed_copper.ormMap : null,
+      metalnessMap: lib ? lib.brushed_copper.ormMap : null,
+      normalMap: lib ? lib.brushed_copper.normalMap : null,
+      color: lib ? '#ffffff' : '#d98448',
+      roughness: lib ? 1.0 : 0.28,
+      metalness: lib ? 1.0 : 0.82
     });
+    this._sharedDarkTitaniumMat = darkTitaniumMat;
 
     // 1. Sleek curved fuselage sculpted via SplineCurve + LatheGeometry!
     const profilePoints = new THREE.SplineCurve([
@@ -352,14 +413,57 @@ export class SpacecraftBuilder {
       strip.position.set(side * 2.28, 2.25, 0.15);
       this.hullPivot.add(strip);
     }
+
+    // 6. Weathered Aerospace Hull Registry & Mission Livery Decals (`SW-04 · STARWEAVER`)
+    const registryTex = createHullRegistryDecalTexture();
+    const registryMat = new THREE.MeshStandardMaterial({
+      map: registryTex,
+      transparent: true,
+      depthWrite: false,
+      roughness: 0.38,
+      metalness: 0.22,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3
+    });
+    for (const side of [-1, 1]) {
+      const decalPlane = new THREE.Mesh(new THREE.PlaneGeometry(2.65, 0.78), registryMat);
+      decalPlane.position.set(side * 2.24, 2.68, 0.65);
+      decalPlane.rotation.y = side > 0 ? Math.PI * 0.5 : -Math.PI * 0.5;
+      decalPlane.rotation.z = -side * 0.05;
+      this.hullPivot.add(decalPlane);
+    }
+
+    const bayPlateTex = createIndustrialSpecPlateTexture({
+      header: 'AUX FUSION BAY',
+      code: 'STARWEAVER · SYS-01',
+      specA: 'OUTPUT: 48.0 MW',
+      specB: 'INSERT CORE TO BOOT',
+      accent: '#ff9638'
+    });
+    const bayPlate = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.62, 0.36),
+      new THREE.MeshStandardMaterial({
+        map: bayPlateTex,
+        roughness: 0.42,
+        metalness: 0.65,
+        polygonOffset: true,
+        polygonOffsetFactor: -3
+      })
+    );
+    bayPlate.position.set(2.49, 2.38, 2.45);
+    bayPlate.rotation.y = Math.PI * 0.5;
+    this.hullPivot.add(bayPlate);
   }
 
   _buildRepairModules() {
-    const darkFrameMat = new THREE.MeshStandardMaterial({
-      color: '#2c374a',
-      roughness: 0.42,
-      metalness: 0.7
-    });
+    const darkFrameMat =
+      this._sharedDarkTitaniumMat ||
+      new THREE.MeshStandardMaterial({
+        color: '#2c374a',
+        roughness: 0.42,
+        metalness: 0.7
+      });
 
     // 1. Power Core Bay (Starboard +X, +Z)
     this.powerBayGroup = new THREE.Group();
@@ -653,15 +757,15 @@ export class SpacecraftBuilder {
     }
     this.hullPivot.add(this.engineGroup);
 
-    // Repair Target Holographic Floor Pads
+    // Low-profile flush Repair Target Holographic Floor Pads (zero wheel clipping when driven over)
     for (const target of Object.values(REPAIR_TARGETS)) {
       const padGroup = new THREE.Group();
       const baseRing = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.56, 0.65, 0.1, 20),
+        new THREE.CylinderGeometry(0.56, 0.64, 0.035, 20),
         darkFrameMat
       );
       const glowDisc = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.42, 0.42, 0.13, 20),
+        new THREE.CylinderGeometry(0.42, 0.42, 0.048, 20),
         new THREE.MeshStandardMaterial({
           color: '#ff9d3b',
           emissive: '#ff6a00',
@@ -671,7 +775,7 @@ export class SpacecraftBuilder {
       );
       padGroup.add(baseRing, glowDisc);
       const gy = getTerrainHeight(target.position.x, target.position.z, false);
-      padGroup.position.set(target.position.x, gy - this.baseGroundY + 0.06, target.position.z);
+      padGroup.position.set(target.position.x, gy - this.baseGroundY + 0.018, target.position.z);
       this.group.add(padGroup);
       this.repairMarkers.set(target.id, { group: padGroup, glowDisc });
     }
@@ -1010,8 +1114,8 @@ export class SpacecraftBuilder {
       this.homeworldGroup.visible = false;
       if (this.environments) this.scene.environment = this.environments.desert;
       if (this.skyDome) this.skyDome.setMode('desert', 0);
-      this.scene.fog.color.set('#e5b487');
-      this.scene.fog.density = 0.0068;
+      this.scene.fog.color.set('#d89c72');
+      this.scene.fog.density = 0.0024;
 
       this.group.position.set(0, this.baseGroundY + Math.sin(elapsed * 45) * 0.03 * p, 0);
       robot.group.visible = p < 0.65;
@@ -1033,7 +1137,7 @@ export class SpacecraftBuilder {
       this.scene.fog.color
         .copy(this._skyDesertCol)
         .lerp(this._skySpaceCol, clamp(p * 1.35, 0, 1));
-      this.scene.fog.density = lerp(0.0068, 0.0008, p);
+      this.scene.fog.density = lerp(0.0024, 0.0005, p);
 
       const climbY = this.baseGroundY + Math.pow(p, 2.1) * 95;
       this.group.position.set(0, climbY, p * 18);
@@ -1066,10 +1170,15 @@ export class SpacecraftBuilder {
     if (p >= 0.65) {
       robot.group.visible = true;
       robot.group.position.set(0, homeY + Math.abs(Math.sin(elapsed * 9)) * 0.32, 4.4);
-      robot.group.rotation.y = 0;
+      robot.group.rotation.set(0, 0, 0);
+      if (robot.groundShadowMesh) {
+        robot.groundShadowMesh.visible = true;
+        robot.groundShadowMesh.position.set(0, homeY + 0.04, 4.4);
+      }
       robot.triggerAction('celebrate', 0.5);
     } else {
       robot.group.visible = false;
+      if (robot.groundShadowMesh) robot.groundShadowMesh.visible = false;
     }
 
     return {
@@ -1091,8 +1200,8 @@ export class SpacecraftBuilder {
       this.skyDome.group.position.y = 0;
       this.skyDome.setMode('desert', 0);
     }
-    this.scene.fog.color.set('#edc095');
-    this.scene.fog.density = 0.0034;
+    this.scene.fog.color.set('#d89c72');
+    this.scene.fog.density = 0.0012;
 
     // Ensure Milo sits at hub spawn
     const rx = 4.8;
@@ -1191,8 +1300,8 @@ export class SpacecraftBuilder {
       this.skyDome.group.position.y = 0;
       this.skyDome.setMode('desert', 0);
     }
-    this.scene.fog.color.set('#edc095');
-    this.scene.fog.density = 0.0034;
+    this.scene.fog.color.set('#d89c72');
+    this.scene.fog.density = 0.0012;
     this.group.position.set(0, this.baseGroundY, 0);
     this.setThrusterPlumes(false);
     robot.group.visible = true;

@@ -530,3 +530,190 @@ export function createVisorCanvas() {
   drawMood('normal', false);
   return { canvas, texture, drawMood };
 }
+
+function applyDistressWear(ctx, w, h, intensity = 0.32, seed = 9001) {
+  if (intensity <= 0) return;
+  const rand = mulberry32(seed);
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+
+  // Abraded paint chips along decal edges & surface
+  const chipCount = Math.floor((w * h * intensity) / 950);
+  for (let i = 0; i < chipCount; i++) {
+    const cx = rand() * w;
+    const cy = rand() * h;
+    const r = 1.2 + Math.pow(rand(), 2.6) * (h * 0.075);
+    ctx.globalAlpha = 0.45 + rand() * 0.55;
+    ctx.beginPath();
+    for (let k = 0; k < 7; k++) {
+      const a = (k / 7) * Math.PI * 2;
+      const rr = r * (0.55 + rand() * 0.7);
+      const px = cx + Math.cos(a) * rr;
+      const py = cy + Math.sin(a) * rr;
+      if (k === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Windblown sand micro-scratches
+  ctx.lineCap = 'round';
+  const scratchCount = Math.floor(18 * intensity);
+  for (let i = 0; i < scratchCount; i++) {
+    const sx = rand() * w;
+    const sy = rand() * h;
+    const ang = (rand() - 0.5) * 0.55;
+    const len = (0.08 + rand() * 0.35) * w;
+    ctx.globalAlpha = 0.45 + rand() * 0.45;
+    ctx.lineWidth = 0.8 + rand() * 2.2;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + Math.cos(ang) * len, sy + Math.sin(ang) * len);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * Generates weathered aerospace hull registry & mission emblem decals (`SW-04 STARWEAVER`)
+ * with polygonOffset support so curved fuselage & stabilizer fins carry authentic sci-fi livery.
+ */
+export function createHullRegistryDecalTexture({
+  code = 'SW-04',
+  vessel = 'STARWEAVER',
+  sub = 'KHARIS-IV SURVEY CORPS',
+  accent = '#ff8b38',
+  primary = '#1d293b'
+} = {}) {
+  const w = 640;
+  const h = 192;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  // Mission chevron emblem on left
+  ctx.save();
+  ctx.translate(82, 96);
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.arc(0, 0, 56, Math.PI * 0.2, Math.PI * 1.8);
+  ctx.stroke();
+
+  ctx.fillStyle = primary;
+  ctx.beginPath();
+  ctx.moveTo(42, 0);
+  ctx.lineTo(-26, -34);
+  ctx.lineTo(-10, 0);
+  ctx.lineTo(-26, 34);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = accent;
+  ctx.beginPath();
+  ctx.arc(-4, 0, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Bold stencil hull registry & mission subtitle
+  ctx.fillStyle = primary;
+  ctx.font = '900 54px system-ui, -apple-system, "Segoe UI", Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`${code} · ${vessel}`, 162, 94);
+
+  ctx.fillStyle = accent;
+  ctx.fillRect(162, 108, 444, 6);
+
+  ctx.fillStyle = primary;
+  ctx.font = '700 22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  ctx.fillText(sub, 164, 142);
+
+  applyDistressWear(ctx, w, h, 0.34, 4207);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+/**
+ * Generates weathered industrial safety & inspection spec plates for Furnace, Fabricator, and Ship Bays.
+ */
+export function createIndustrialSpecPlateTexture({
+  header = 'SOLAR CRUCIBLE UNIT',
+  code = 'UNIT SC-1420',
+  specA = 'MAX TEMP: 1,420 C',
+  specB = 'CAUTION: THERMAL RADIATION',
+  accent = '#ffad3b'
+} = {}) {
+  const w = 384;
+  const h = 224;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+
+  // Brushed riveted metal plaque base
+  const grad = ctx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, '#202938');
+  grad.addColorStop(0.5, '#2b374a');
+  grad.addColorStop(1, '#1a2230');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.roundRect(6, 6, w - 12, h - 12, 12);
+  ctx.fill();
+
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.roundRect(14, 14, w - 28, h - 28, 8);
+  ctx.stroke();
+
+  // Hazard header bar
+  ctx.fillStyle = accent;
+  ctx.fillRect(22, 22, w - 44, 42);
+  ctx.fillStyle = '#141a24';
+  ctx.font = '900 22px system-ui, -apple-system, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(header, w * 0.5, 43);
+
+  // Technical readout rows
+  ctx.fillStyle = '#e6f0ff';
+  ctx.font = '700 22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(code, 32, 98);
+
+  ctx.fillStyle = 'rgba(230, 240, 255, 0.25)';
+  ctx.fillRect(32, 114, w - 64, 2);
+
+  ctx.fillStyle = '#b9cde6';
+  ctx.font = '600 17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  ctx.fillText(specA, 32, 142);
+  ctx.fillStyle = accent;
+  ctx.fillText(specB, 32, 174);
+
+  // 4 corner bolts
+  for (const [bx, by] of [
+    [26, 200],
+    [w - 26, 200],
+    [26, 26],
+    [w - 26, 26]
+  ]) {
+    ctx.fillStyle = '#6e7e96';
+    ctx.beginPath();
+    ctx.arc(bx, by, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  applyDistressWear(ctx, w, h, 0.18, 7319);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}

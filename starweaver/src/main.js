@@ -5,12 +5,14 @@ import { SoundEngine } from './audio/soundEngine.js';
 import { createPlanetEnvironments } from './graphics/environment.js';
 import { PostProcessingPipeline } from './graphics/postProcessing.js';
 import { ParticleSystem } from './graphics/particleSystem.js';
+import { WeatherParticles } from './graphics/weatherParticles.js';
 import { WorldBuilder } from './scene/worldBuilder.js';
 import { SpacecraftBuilder } from './scene/spacecraftBuilder.js';
 import { RobotController } from './entities/robotController.js';
 import { CameraController } from './scene/cameraController.js';
 import { InteractionSystem } from './systems/interactionSystem.js';
 import { GuidanceSystem } from './systems/guidanceSystem.js';
+import { AtmosphereSystem } from './systems/atmosphereSystem.js';
 import { HudController } from './ui/hudController.js';
 import { TouchControls } from './ui/touchControls.js';
 
@@ -39,36 +41,80 @@ class LittleBotHomeboundApp {
     // 1. Procedural IBL Environment Maps
     this.environments = createPlanetEnvironments(this.renderer);
     this.scene.environment = this.environments.desert;
-    this.scene.environmentIntensity = 0.88;
+    this.scene.environmentIntensity = 0.96;
 
-    // 2. Scene Builders & Pooled Particle System
+    // 2. Scene Builders & Pooled Particle System (with shared GPU 1024px PBR Library)
     this.particles = new ParticleSystem(this.scene);
-    this.world = new WorldBuilder(this.scene, this.state);
+    this.world = new WorldBuilder(this.scene, this.state, this.renderer);
     this.spacecraft = new SpacecraftBuilder(
       this.scene,
       this.state,
       this.environments,
-      this.world.skyDome
+      this.world.skyDome,
+      this.world.pbrLibrary
     );
     this.robot = new RobotController(
       this.scene,
       this.state,
       this.sound,
-      this.particles
+      this.particles,
+      this.world.pbrLibrary
     );
     this.cameraCtrl = new CameraController(this.camera, this.canvas, this.state);
 
-    // 3. Post-Processing Pipeline
+    // 3. Next-Gen Multi-Pass Post-Processing Pipeline (SSAO + Volumetric + Karis Bloom + AgX/ACES)
     this.postProcessing = new PostProcessingPipeline(
       this.renderer,
       this.scene,
-      this.camera
+      this.camera,
+      this.world
     );
+
+    // 4. GPU Stateless Weather Particles & Dynamic Day-Night / 3-State Weather Orchestrator
+    this.weatherParticles = new WeatherParticles(this.scene, {
+      isMobile: this.world.isCoarseMobileDevice()
+    });
+    this.atmosphere = new AtmosphereSystem({
+      state: this.state,
+      scene: this.scene,
+      environments: this.environments,
+      world: this.world,
+      robot: this.robot,
+      postProcessing: this.postProcessing,
+      sound: this.sound,
+      weatherParticles: this.weatherParticles
+    });
 
     this.allColliders = [
       ...this.world.colliders,
       ...this.spacecraft.getColliders()
     ];
+    this.cameraCtrl.setOccluders(this.allColliders);
+
+    if (this.world.planarReflection) {
+      if (this.robot.guideRig) {
+        this.world.planarReflection.registerExcludedObject(this.robot.guideRig);
+      }
+      if (this.robot.headlampCone) {
+        this.world.planarReflection.registerExcludedObject(this.robot.headlampCone);
+      }
+      this.world.planarReflection.registerExcludedObject(this.weatherParticles.sandMesh);
+      this.world.planarReflection.registerExcludedObject(this.weatherParticles.starDustMesh);
+    }
+
+    // Automatic GPU driver safety fallback for custom PCSS shadow chunk
+    if (this.renderer.debug) {
+      this.renderer.debug.onShaderError = (gl, program, vs, fs) => {
+        try {
+          const fsSrc = gl.getShaderSource(fs) || '';
+          if (fsSrc.includes('STARWEAVER_PCSS_SHADOW')) {
+            this.world.fallbackDisablePcss(this.renderer);
+          }
+        } catch {
+          // Ignore shader source inspection failure
+        }
+      };
+    }
 
     this.introCutscene = {
       active: false,
@@ -89,18 +135,40 @@ class LittleBotHomeboundApp {
       onStartMission: () => {
         this.sound.ensureContext();
         this.state.resetState(true);
+        this.atmosphere.resetForNewMission();
         this.beginIntroCutscene();
       },
       onContinueMission: () => {
         this.sound.ensureContext();
         this.state.load();
+        this.atmosphere.restoreFromState();
+        if (this.state.launchedHome) {
+          // Align post-game saved continue with full sandbox exploration state
+          this.state.equipment.drill = true;
+          this.state.equipment.jetpack = true;
+          this.state.pylonsAligned.pylon_north = true;
+          this.state.pylonsAligned.pylon_south = true;
+          this.state.save();
+        }
         this.sound.setMuted(this.state.settings.muted);
         this._applyGraphicsQuality(this.state.settings.quality);
         this.cameraCtrl.clearShowcase();
         this.spacecraft.restoreDesertPlacement(this.robot);
         this.robot.clearIntroSleepPose();
+        this.atmosphere.update(0.016, this._totalElapsed, this.camera, true);
+        this.cameraCtrl.snapToPose(
+          this.cameraCtrl.getDesiredFollowPose(this.robot.position)
+        );
         this.hud.setHudVisible(true);
         this.hud.renderAll();
+        if (this.state.launchedHome) {
+          this.hud.showToast(
+            this.state.lang === 'zh'
+              ? '已进入通关自由探索模式 —— 可继续寻回日志，或前往舷梯重温返航！'
+              : 'Post-Game Free Roam Active — explore Kharis-4 or board the ramp to replay liftoff!',
+            'celebrate'
+          );
+        }
       },
       onSkipIntro: () => {
         this.finishIntroCutscene();
@@ -116,6 +184,7 @@ class LittleBotHomeboundApp {
         this.cutscene.active = false;
         this.cameraCtrl.clearShowcase();
         this.state.resetState(true);
+        this.atmosphere.resetForNewMission();
         this.beginIntroCutscene();
       },
       onQualityChange: (q) => {
@@ -134,6 +203,7 @@ class LittleBotHomeboundApp {
         this.state.save();
         this.spacecraft.restoreDesertPlacement(this.robot);
         this.robot.clearIntroSleepPose();
+        this.atmosphere.update(0.016, this._totalElapsed, this.camera, false);
         this.hud.setHudVisible(true);
         this.hud.renderAll();
       },
@@ -266,6 +336,9 @@ class LittleBotHomeboundApp {
     this.postProcessing.setQuality(quality);
     this.postProcessing.resize(w, h, this.renderer.getPixelRatio());
     this.particles.setEnabled(quality !== 'low');
+    if (this.weatherParticles) {
+      this.weatherParticles.setEnabled(quality !== 'low');
+    }
   }
 
   beginIntroCutscene() {
@@ -294,6 +367,7 @@ class LittleBotHomeboundApp {
 
     this.spacecraft.restoreDesertPlacement(this.robot);
     this.robot.clearIntroSleepPose();
+    this.atmosphere.update(0.016, this._totalElapsed, this.camera, false);
     this.cameraCtrl.yaw = 0.44;
     this.cameraCtrl.pitch = 0.27;
     this.cameraCtrl.distance = 11.2;
@@ -369,6 +443,9 @@ class LittleBotHomeboundApp {
         if (document.hidden) {
           this.keys.clear();
           if (this.touchControls) this.touchControls.resetInputState();
+          if (this.hud.activeModal !== 'title') {
+            this.state.save(true);
+          }
         } else {
           this._lastTime = performance.now();
         }
@@ -516,11 +593,15 @@ class LittleBotHomeboundApp {
         Math.cos(orbitAngle) * 16.5 + 1.5
       );
       this.world.update(dt, this._totalElapsed, null, null);
-      this.world.updateShadowFollow(dt, null, this.renderer, false);
       this.spacecraft.update(dt, this._totalElapsed, false);
       this.particles.update(dt, false);
       this.cameraCtrl.update(dt, this.robot.position, this._titleCamPose);
-      this.postProcessing.render();
+      this.atmosphere.update(dt, this._totalElapsed, this.camera, false, { isTitle: true });
+      this.world.updateShadowFollow(dt, null, this.renderer, false);
+      if (this.world.planarReflection) {
+        this.world.planarReflection.update(this._totalElapsed, this.camera, false);
+      }
+      this.postProcessing.render(dt, this._totalElapsed);
       return;
     }
 
@@ -556,13 +637,17 @@ class LittleBotHomeboundApp {
         finalFollowPose
       );
 
+      this.atmosphere.applyCutsceneOverride('intro', this.camera);
       this.world.update(dt, this._totalElapsed, null, null);
       this.world.updateShadowFollow(dt, null, this.renderer, true);
       this.spacecraft.update(dt, this._totalElapsed, 'intro');
       this.particles.update(dt, false);
       this.sound.updateSpatial(dt, this.robot.position, false, true);
       this.cameraCtrl.update(dt, this.robot.position, camOverride);
-      this.postProcessing.render();
+      if (this.world.planarReflection) {
+        this.world.planarReflection.update(this._totalElapsed, this.camera, true);
+      }
+      this.postProcessing.render(dt, this._totalElapsed);
 
       if (t >= 1) {
         this.finishIntroCutscene();
@@ -582,18 +667,27 @@ class LittleBotHomeboundApp {
         }
       }
 
+      this.world.skyDome.uniforms.uTime.value = this._totalElapsed;
+      this.spacecraft.update(dt, this._totalElapsed, 'launch');
+      this.robot.update(dt, this._totalElapsed, this._zeroMoveVec, 0, [], true, null);
       const camOverride = this.spacecraft.applyCutsceneFrame(
         t,
         this._totalElapsed,
         this.robot
       );
-      this.world.skyDome.uniforms.uTime.value = this._totalElapsed;
-      this.spacecraft.update(dt, this._totalElapsed, 'launch');
-      this.robot.update(dt, this._totalElapsed, this._zeroMoveVec, 0, [], true, null);
-      this.world.updateShadowFollow(dt, this.robot.position, this.renderer, this.cutscene.active);
+      this.atmosphere.applyCutsceneOverride('launch', this.camera, t);
+      this.world.updateShadowFollow(
+        dt,
+        this.spacecraft.group.position,
+        this.renderer,
+        this.cutscene.active
+      );
       this.sound.updateSpatial(dt, this.robot.position, false, true);
       this.cameraCtrl.update(dt, this.robot.position, camOverride);
-      this.postProcessing.render();
+      if (this.world.planarReflection) {
+        this.world.planarReflection.update(this._totalElapsed, this.camera, this.cutscene.active);
+      }
+      this.postProcessing.render(dt, this._totalElapsed);
 
       if (this.cutscene.active && t >= 1) {
         this.cutscene.active = false;
@@ -645,6 +739,8 @@ class LittleBotHomeboundApp {
       activeWaypoint,
       this.robot.position
     );
+    this.cameraCtrl.update(dt, this.robot.position, null);
+    this.atmosphere.update(dt, this._totalElapsed, this.camera, isHardPaused);
     this.world.updateShadowFollow(dt, this.robot.position, this.renderer, false);
     this.spacecraft.update(dt, this._totalElapsed, false);
     if (!isHardPaused) {
@@ -656,13 +752,15 @@ class LittleBotHomeboundApp {
       this.state.craftingQueue.length > 0 && !isHardPaused,
       false
     );
-    this.cameraCtrl.update(dt, this.robot.position, null);
     this.hud.updateFrame(dt, nearest, idleHint, activeWaypoint, this.robot.jetFuel);
     if (this.touchControls && !blocked) {
       this.touchControls.updateContext(nearest);
     }
 
-    this.postProcessing.render();
+    if (this.world.planarReflection) {
+      this.world.planarReflection.update(this._totalElapsed, this.camera, false);
+    }
+    this.postProcessing.render(dt, this._totalElapsed);
   }
 }
 

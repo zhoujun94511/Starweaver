@@ -406,6 +406,11 @@ export class HudController {
         this.setLeftCollapsed(true, true);
         this.setBagCollapsed(true, true);
         this.setRightCollapsed(true, true);
+      } else if (!this._shouldAutoCollapseDrawers()) {
+        // Restore expanded drawers on wide desktop screens when toggling back to Full Hints!
+        this.setLeftCollapsed(false, true);
+        this.setBagCollapsed(false, true);
+        this.setRightCollapsed(false, true);
       }
     });
 
@@ -1432,6 +1437,7 @@ export class HudController {
     const qRow = el('div', 'station-tabs');
     qRow.style.flexWrap = 'wrap';
     for (const [qVal, qKey] of [
+      ['ultra', 'qualityUltra'],
       ['high', 'qualityHigh'],
       ['medium', 'qualityMedium'],
       ['low', 'qualityLow']
@@ -1472,6 +1478,58 @@ export class HudController {
     qRow.append(audioBtn, langBtn);
     qBox.appendChild(qRow);
     this.modalPanel.appendChild(qBox);
+
+    // 2.5 Planetary Day-Night Cycle & Kharis-4 Desert Weather Controls!
+    const envBox = el('div', 'queue-box');
+    envBox.appendChild(el('div', 'section-label', this.state.ui('envTimeLabel')));
+    const timeRow = el('div', 'station-tabs');
+    timeRow.style.flexWrap = 'wrap';
+    const curTimeMode = this.state.settings.timeMode || 'cycle';
+    for (const [tVal, tKey] of [
+      ['cycle', 'timeCycle'],
+      ['day', 'timeDay'],
+      ['night', 'timeNight']
+    ]) {
+      const tb = el(
+        'button',
+        `hud-btn${curTimeMode === tVal ? ' primary' : ''}`,
+        this.state.ui(tKey)
+      );
+      tb.addEventListener('click', () => {
+        this.sound.playUiClick();
+        this.state.setTimeMode(tVal);
+        this.openPauseModal();
+      });
+      timeRow.appendChild(tb);
+    }
+    envBox.appendChild(timeRow);
+
+    const wLabel = el('div', 'section-label', this.state.ui('envWeatherLabel'));
+    wLabel.style.marginTop = '10px';
+    envBox.appendChild(wLabel);
+    const weatherRow = el('div', 'station-tabs');
+    weatherRow.style.flexWrap = 'wrap';
+    const curWeatherMode = this.state.settings.weatherMode || 'dynamic';
+    for (const [wVal, wKey] of [
+      ['dynamic', 'weatherDynamic'],
+      ['clear', 'weatherClear'],
+      ['overcast', 'weatherOvercast'],
+      ['sandstorm', 'weatherSandstorm']
+    ]) {
+      const wb = el(
+        'button',
+        `hud-btn${curWeatherMode === wVal ? ' primary' : ''}`,
+        this.state.ui(wKey)
+      );
+      wb.addEventListener('click', () => {
+        this.sound.playUiClick();
+        this.state.setWeatherMode(wVal);
+        this.openPauseModal();
+      });
+      weatherRow.appendChild(wb);
+    }
+    envBox.appendChild(weatherRow);
+    this.modalPanel.appendChild(envBox);
 
     const actCol = el('div', 'recipe-grid');
 

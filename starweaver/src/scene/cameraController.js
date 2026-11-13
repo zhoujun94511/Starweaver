@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ELEVATED_PLATFORMS } from '../data/gameData.js';
 import { clamp, damp, getTerrainHeight } from '../utils/math.js';
 
 export class CameraController {
@@ -19,9 +20,12 @@ export class CameraController {
     this._desiredLook = new THREE.Vector3();
     this._posePos = new THREE.Vector3();
     this._poseLook = new THREE.Vector3();
+    this._safePosScratch = new THREE.Vector3();
 
     this.showcase = null;
     this.stationFocus = null;
+    this.occluders = [];
+    this._occlusionFrac = 1.0;
 
     // Multi-touch safe pointer map (pointerId -> { x, y }) + two-finger pinch zoom
     this._activePointers = new Map();
@@ -74,7 +78,7 @@ export class CameraController {
 
         const sens = e.pointerType === 'touch' ? 0.0068 : 0.0055;
         this.yaw -= dx * sens;
-        this.pitch = clamp(this.pitch + dy * (sens * 0.82), 0.14, 1.02);
+        this.pitch = clamp(this.pitch + dy * (sens * 0.82), 0.04, 1.02);
       } else if (this._activePointers.size === 2) {
         rec.x = e.clientX;
         rec.y = e.clientY;
@@ -91,10 +95,12 @@ export class CameraController {
     this.domElement.addEventListener('pointercancel', onPointerEnd);
     this.domElement.addEventListener('lostpointercapture', onPointerEnd);
 
-    window.addEventListener('blur', () => {
-      this._activePointers.clear();
-      this._pinchPrevDist = 0;
-    });
+    if (typeof window !== 'undefined') {
+      window.addEventListener('blur', () => {
+        this._activePointers.clear();
+        this._pinchPrevDist = 0;
+      });
+    }
 
     this.domElement.addEventListener(
       'wheel',
@@ -124,9 +130,19 @@ export class CameraController {
   }
 
   triggerShowcase(lookTarget, camOffset, duration = 2.1) {
+    const rawPos = lookTarget.clone().add(camOffset);
+    const safePos = this._constrainCameraSegment(
+      lookTarget.x,
+      lookTarget.y,
+      lookTarget.z,
+      rawPos.x,
+      rawPos.y,
+      rawPos.z,
+      new THREE.Vector3()
+    );
     this.showcase = {
       lookTarget: lookTarget.clone(),
-      desiredPos: lookTarget.clone().add(camOffset),
+      desiredPos: safePos,
       timer: duration
     };
   }
@@ -137,16 +153,22 @@ export class CameraController {
 
   setStationFocus(stationPos) {
     const y = getTerrainHeight(stationPos.x, stationPos.z, this.state.isBridgeExtended());
-    const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+    const aspect = typeof window !== 'undefined' ? window.innerWidth / Math.max(1, window.innerHeight) : 1.6;
     const rightBias = aspect < 1.05 ? 0.25 : aspect < 1.4 ? 1.25 : 1.85;
     const distZ = aspect < 1.05 ? 6.8 : 5.6;
+    const lookAt = new THREE.Vector3(stationPos.x + rightBias, y + 1.45, stationPos.z - 0.3);
+    const desiredPos = this._constrainCameraSegment(
+      lookAt.x,
+      lookAt.y,
+      lookAt.z,
+      stationPos.x + rightBias + 1.05,
+      y + 3.15,
+      stationPos.z + distZ,
+      new THREE.Vector3()
+    );
     this.stationFocus = {
-      lookAt: new THREE.Vector3(stationPos.x + rightBias, y + 1.45, stationPos.z - 0.3),
-      desiredPos: new THREE.Vector3(
-        stationPos.x + rightBias + 1.05,
-        y + 3.15,
-        stationPos.z + distZ
-      )
+      lookAt,
+      desiredPos
     };
   }
 
@@ -154,17 +176,136 @@ export class CameraController {
     this.stationFocus = null;
   }
 
+  setOccluders(colliders) {
+    this.occluders = Array.isArray(colliders)
+      ? colliders.filter((c) => c && c.occluder)
+      : [];
+  }
+
+  /**
+   * Analytical zero-GC spring-arm sightline solver:
+   * Intersects LookAt -> DesiredCam segment against elevated sky-mesas, canyon cliffs,
+   * sandstone archways, outpost dome, and Starweaver fuselage & wings so the camera NEVER clips inside solid geometry!
+   */
+  _solveSpringArmFraction(lx, ly, lz, dx, dy, dz) {
+    const vx = dx - lx;
+    const vz = dz - lz;
+    const vy = dy - ly;
+    const a = vx * vx + vz * vz;
+    if (a < 1e-4) return 1.0;
+
+    let minFrac = 1.0;
+    const camMargin = 0.52;
+
+    const testCylinder = (cx, cz, radius, topY, bottomY) => {
+      const r = radius + camMargin;
+      const ox = lx - cx;
+      const oz = lz - cz;
+      const c = ox * ox + oz * oz - r * r;
+      const b = 2.0 * (ox * vx + oz * vz);
+      const disc = b * b - 4.0 * a * c;
+      if (disc <= 0) return;
+
+      const sqrtD = Math.sqrt(disc);
+      const inv2a = 0.5 / a;
+      const tEnter = (-b - sqrtD) * inv2a;
+      const tExit = (-b + sqrtD) * inv2a;
+
+      if (tExit <= 0.04 || tEnter >= minFrac) return;
+
+      if (tEnter > 0.0) {
+        const hitY = ly + vy * tEnter;
+        const belowTop = topY === undefined || hitY < topY + 0.35;
+        const aboveBottom = bottomY === undefined || hitY > bottomY - 0.25;
+        if (belowTop && aboveBottom) {
+          minFrac = Math.min(minFrac, Math.max(0.2, tEnter - 0.025));
+        }
+      }
+    };
+
+    // 1. Check against all 5 Elevated Sky-Spire / Basalt Columns
+    for (const plat of ELEVATED_PLATFORMS) {
+      if (ly < plat.topY + 0.25 || dy < plat.topY + 0.25) {
+        testCylinder(plat.x, plat.z, plat.radius * 1.18, plat.topY, undefined);
+      }
+    }
+
+    // 2. Check against Canyon Cliffs, Arch Piers, Spacecraft Fuselage & Wings, Outpost Dome & Giant Boulders
+    for (let i = 0; i < this.occluders.length; i++) {
+      const col = this.occluders[i];
+      if (col.activeFn && !col.activeFn()) continue;
+      testCylinder(col.x, col.z, col.radius, col.maxY, col.occluderMinY);
+    }
+
+    return minFrac;
+  }
+
+  _constrainCameraSegment(lx, ly, lz, dx, dy, dz, outVec) {
+    const liftedY = this._enforceTerrainSightlineClearance(lx, ly, lz, dx, dy, dz);
+    const frac = this._solveSpringArmFraction(lx, ly, lz, dx, liftedY, dz);
+    const sx = lx + (dx - lx) * frac;
+    const sz = lz + (dz - lz) * frac;
+    let sy = ly + (liftedY - ly) * frac;
+    const gY = getTerrainHeight(sx, sz, this.state.isBridgeExtended());
+    if (gY > -2.5) {
+      sy = Math.max(sy, gY + 1.45);
+    }
+    return outVec.set(sx, sy, sz);
+  }
+
+  /**
+   * Ensures the entire sightline clears rolling dune crests & crater rims (not just the endpoint!).
+   */
+  _enforceTerrainSightlineClearance(lx, ly, lz, dx, dy, dz) {
+    const bridgeOpen = this.state.isBridgeExtended();
+    let liftedY = dy;
+    const steps = [0.4, 0.7, 1.0];
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      const sx = lx + (dx - lx) * s;
+      const sz = lz + (dz - lz) * s;
+      const gY = getTerrainHeight(sx, sz, bridgeOpen);
+      if (gY > -2.5) {
+        const clearance = s === 1.0 ? 1.82 : 1.15;
+        const minLineY = gY + clearance;
+        const curLineY = ly + (liftedY - ly) * s;
+        if (curLineY < minLineY) {
+          liftedY = ly + (minLineY - ly) / s;
+        }
+      }
+    }
+    return liftedY;
+  }
+
   getDesiredFollowPose(targetPos) {
     this._poseLook.set(targetPos.x, targetPos.y + 1.58, targetPos.z);
     const horizDist = Math.cos(this.pitch) * this.distance;
     const vertDist = Math.sin(this.pitch) * this.distance;
-    const dx = this._poseLook.x + Math.sin(this.yaw) * horizDist;
-    const dz = this._poseLook.z + Math.cos(this.yaw) * horizDist;
-    let dy = this._poseLook.y + vertDist;
-    const groundAtCam = getTerrainHeight(dx, dz, this.state.isBridgeExtended());
-    if (groundAtCam > -2.5) {
-      dy = Math.max(dy, groundAtCam + 1.85);
-    }
+    const fullX = this._poseLook.x + Math.sin(this.yaw) * horizDist;
+    const fullZ = this._poseLook.z + Math.cos(this.yaw) * horizDist;
+    let fullY = this._poseLook.y + vertDist;
+
+    fullY = this._enforceTerrainSightlineClearance(
+      this._poseLook.x,
+      this._poseLook.y,
+      this._poseLook.z,
+      fullX,
+      fullY,
+      fullZ
+    );
+
+    const frac = this._solveSpringArmFraction(
+      this._poseLook.x,
+      this._poseLook.y,
+      this._poseLook.z,
+      fullX,
+      fullY,
+      fullZ
+    );
+    const dx = this._poseLook.x + (fullX - this._poseLook.x) * frac;
+    const dz = this._poseLook.z + (fullZ - this._poseLook.z) * frac;
+    const dy = this._poseLook.y + (fullY - this._poseLook.y) * frac;
+
     this._posePos.set(dx, dy, dz);
     return {
       position: this._posePos,
@@ -173,6 +314,7 @@ export class CameraController {
   }
 
   snapToPose(pose) {
+    this._occlusionFrac = 1.0;
     this.currentPos.copy(pose.position);
     this.currentLookAt.copy(pose.lookAt);
     this.camera.position.copy(this.currentPos);
@@ -189,8 +331,17 @@ export class CameraController {
     }
 
     if (this.stationFocus) {
-      this.currentPos.lerp(this.stationFocus.desiredPos, Math.min(1, dt * 6.0));
       this.currentLookAt.lerp(this.stationFocus.lookAt, Math.min(1, dt * 6.5));
+      const safeTarget = this._constrainCameraSegment(
+        this.currentLookAt.x,
+        this.currentLookAt.y,
+        this.currentLookAt.z,
+        this.stationFocus.desiredPos.x,
+        this.stationFocus.desiredPos.y,
+        this.stationFocus.desiredPos.z,
+        this._safePosScratch
+      );
+      this.currentPos.lerp(safeTarget, Math.min(1, dt * 6.0));
       this.camera.position.copy(this.currentPos);
       this.camera.lookAt(this.currentLookAt);
       return;
@@ -198,8 +349,17 @@ export class CameraController {
 
     if (this.showcase && this.showcase.timer > 0) {
       this.showcase.timer -= dt;
-      this.currentPos.lerp(this.showcase.desiredPos, Math.min(1, dt * 4.5));
       this.currentLookAt.lerp(this.showcase.lookTarget, Math.min(1, dt * 5.5));
+      const safeTarget = this._constrainCameraSegment(
+        this.currentLookAt.x,
+        this.currentLookAt.y,
+        this.currentLookAt.z,
+        this.showcase.desiredPos.x,
+        this.showcase.desiredPos.y,
+        this.showcase.desiredPos.z,
+        this._safePosScratch
+      );
+      this.currentPos.lerp(safeTarget, Math.min(1, dt * 4.5));
       this.camera.position.copy(this.currentPos);
       this.camera.lookAt(this.currentLookAt);
       if (this.showcase.timer <= 0) {
@@ -216,9 +376,35 @@ export class CameraController {
     const horizDist = Math.cos(this.pitch) * this.distance;
     const vertDist = Math.sin(this.pitch) * this.distance;
 
-    const desiredX = this.currentLookAt.x + Math.sin(this.yaw) * horizDist;
-    const desiredZ = this.currentLookAt.z + Math.cos(this.yaw) * horizDist;
-    let desiredY = this.currentLookAt.y + vertDist;
+    const fullX = this.currentLookAt.x + Math.sin(this.yaw) * horizDist;
+    const fullZ = this.currentLookAt.z + Math.cos(this.yaw) * horizDist;
+    let fullY = this.currentLookAt.y + vertDist;
+
+    fullY = this._enforceTerrainSightlineClearance(
+      this.currentLookAt.x,
+      this.currentLookAt.y,
+      this.currentLookAt.z,
+      fullX,
+      fullY,
+      fullZ
+    );
+
+    const targetFrac = this._solveSpringArmFraction(
+      this.currentLookAt.x,
+      this.currentLookAt.y,
+      this.currentLookAt.z,
+      fullX,
+      fullY,
+      fullZ
+    );
+
+    // Asymmetric spring-arm response: snap forward fast when occluded, ease back smoothly when clear!
+    const fracRate = targetFrac < this._occlusionFrac ? 26.0 : 6.5;
+    this._occlusionFrac = damp(this._occlusionFrac, targetFrac, fracRate, dt);
+
+    const desiredX = this.currentLookAt.x + (fullX - this.currentLookAt.x) * this._occlusionFrac;
+    const desiredZ = this.currentLookAt.z + (fullZ - this.currentLookAt.z) * this._occlusionFrac;
+    let desiredY = this.currentLookAt.y + (fullY - this.currentLookAt.y) * this._occlusionFrac;
 
     const groundAtCam = getTerrainHeight(
       desiredX,
@@ -226,12 +412,13 @@ export class CameraController {
       this.state.isBridgeExtended()
     );
     if (groundAtCam > -2.5) {
-      desiredY = Math.max(desiredY, groundAtCam + 1.85);
+      desiredY = Math.max(desiredY, groundAtCam + 1.45);
     }
 
-    this.currentPos.x = damp(this.currentPos.x, desiredX, 9, dt);
-    this.currentPos.y = damp(this.currentPos.y, desiredY, 9, dt);
-    this.currentPos.z = damp(this.currentPos.z, desiredZ, 9, dt);
+    const posRate = targetFrac < 0.98 ? 18 : 9;
+    this.currentPos.x = damp(this.currentPos.x, desiredX, posRate, dt);
+    this.currentPos.y = damp(this.currentPos.y, desiredY, posRate, dt);
+    this.currentPos.z = damp(this.currentPos.z, desiredZ, posRate, dt);
 
     this.camera.position.copy(this.currentPos);
     this.camera.lookAt(this.currentLookAt);

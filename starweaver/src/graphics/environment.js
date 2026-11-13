@@ -1,99 +1,151 @@
 import * as THREE from 'three';
+import { createSkyDome } from './skyDome.js';
 
 /**
- * Generates zero-network-asset HDR-like IBL Environment Maps via THREE.PMREMGenerator.
- * Gives metallic & glossy PBR surfaces (Starweaver hull, Milo's clearcoat shell, copper pipes,
- * crystals) rich sky-to-ground reflections instead of flat dark plastic shading.
+ * Generates zero-runtime-cost static HDR IBL Environment Probes via THREE.PMREMGenerator:
+ * 1. `desert` (Daytime golden twin-sun desert sky + cloud relief)
+ * 2. `desertNight` (Starry Milky Way + colossal cyan-gold ringed planet + nocturnal rim)
+ * 3. `homeworld` (Lush emerald meadow + azure sky)
+ *
+ * Pre-baking Day & Night probes once at boot completely avoids runtime PMREM regeneration stutters!
  */
 export function createPlanetEnvironments(renderer) {
   const pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
 
-  const desertEnv = buildSkyProbe(pmrem, {
-    zenith: new THREE.Color('#3b6fa8'),
-    horizon: new THREE.Color('#ffcf96'),
-    ground: new THREE.Color('#b86b3d'),
-    sunColor: new THREE.Color('#fff6dc'),
-    sunIntensity: 6.0,
-    rimColor: new THREE.Color('#6ce8ff')
+  const desertEnv = bakeAtmosphericProbe(pmrem, 'desert', {
+    nightFactor: 0.0,
+    keyPos: [31.5, 48.0, 21.0],
+    sunColor: new THREE.Color('#fff2d4'),
+    sunIntensity: 7.5,
+    rimColor: new THREE.Color('#6ee2ff'),
+    rimIntensity: 1.55,
+    groundBounce: new THREE.Color('#c97848'),
+    groundIntensity: 0.92
   });
 
-  const homeworldEnv = buildSkyProbe(pmrem, {
-    zenith: new THREE.Color('#2d8cf0'),
-    horizon: new THREE.Color('#b8f0ff'),
-    ground: new THREE.Color('#3ca865'),
-    sunColor: new THREE.Color('#fffbe6'),
-    sunIntensity: 5.5,
-    rimColor: new THREE.Color('#9effc8')
+  const desertNightEnv = bakeAtmosphericProbe(pmrem, 'desert', {
+    nightFactor: 1.0,
+    keyPos: [-28.0, 34.0, -39.0], // Aligned with Giant Ringed Planet ("Kharis Prime") moonlight!
+    sunColor: new THREE.Color('#8ecbff'),
+    sunIntensity: 3.4,
+    rimColor: new THREE.Color('#ffb870'), // Subtle warm camp/nebula counter-rim
+    rimIntensity: 0.85,
+    groundBounce: new THREE.Color('#24304a'),
+    groundIntensity: 0.65
+  });
+
+  const homeworldEnv = bakeAtmosphericProbe(pmrem, 'homeworld', {
+    nightFactor: 0.0,
+    keyPos: [31.5, 48.0, 21.0],
+    sunColor: new THREE.Color('#fffbe8'),
+    sunIntensity: 6.8,
+    rimColor: new THREE.Color('#9effcf'),
+    rimIntensity: 1.55,
+    groundBounce: new THREE.Color('#3ca868'),
+    groundIntensity: 0.92
   });
 
   pmrem.dispose();
   return {
     desert: desertEnv.texture,
+    desertNight: desertNightEnv.texture,
     homeworld: homeworldEnv.texture
   };
 }
 
-function buildSkyProbe(pmrem, palette) {
+function bakeAtmosphericProbe(pmrem, mode, opts) {
   const envScene = new THREE.Scene();
 
-  const skyGeo = new THREE.SphereGeometry(60, 32, 24);
-  const skyMat = new THREE.ShaderMaterial({
+  const sky = createSkyDome();
+  sky.setMode(mode, 0);
+  sky.uniforms.uEnv.value = 1.0;
+  sky.uniforms.uNightFactor.value = opts.nightFactor || 0.0;
+  sky.uniforms.uTime.value = 12.4;
+
+  const sphereGeo = new THREE.SphereGeometry(80, 48, 32);
+  const skyBakeMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
-    uniforms: {
-      uZenith: { value: palette.zenith },
-      uHorizon: { value: palette.horizon },
-      uGround: { value: palette.ground }
-    },
+    toneMapped: false,
+    uniforms: sky.uniforms,
     vertexShader: `
-      varying vec3 vWorldPos;
+      varying vec3 vDir;
       void main() {
-        vWorldPos = position;
+        vDir = position;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
-    fragmentShader: `
-      varying vec3 vWorldPos;
-      uniform vec3 uZenith;
-      uniform vec3 uHorizon;
-      uniform vec3 uGround;
-      void main() {
-        vec3 dir = normalize(vWorldPos);
-        float y = dir.y;
-        vec3 col = y >= 0.0
-          ? mix(uHorizon, uZenith, pow(y, 0.58))
-          : mix(uHorizon, uGround, pow(-y, 0.45));
-        gl_FragColor = vec4(col * 1.15, 1.0);
-      }
-    `
+    fragmentShader: sky.material.fragmentShader
   });
-  envScene.add(new THREE.Mesh(skyGeo, skyMat));
+  envScene.add(new THREE.Mesh(sphereGeo, skyBakeMat));
 
-  // Emissive sun reflector card for crisp specular highlights on rounded metal/robot shell
+  // Crisp key specular highlight disc (Twin Sun by day, Giant Ringed Planet by night)
   const sunDisc = new THREE.Mesh(
-    new THREE.SphereGeometry(6.5, 16, 16),
+    new THREE.SphereGeometry(5.8, 20, 16),
     new THREE.MeshBasicMaterial({
-      color: palette.sunColor.clone().multiplyScalar(palette.sunIntensity)
+      color: opts.sunColor.clone().multiplyScalar(opts.sunIntensity),
+      toneMapped: false
     })
   );
-  sunDisc.position.set(28, 36, 18);
+  sunDisc.position.set(opts.keyPos[0], opts.keyPos[1], opts.keyPos[2]);
   envScene.add(sunDisc);
 
-  // Cool sky fill card on opposite side for pleasing warm-cool rim contrast
-  const coolFill = new THREE.Mesh(
-    new THREE.PlaneGeometry(26, 16),
+  // Opposite-sky rim reflector card for metallic edge separation
+  const coolRim = new THREE.Mesh(
+    new THREE.PlaneGeometry(32, 18),
     new THREE.MeshBasicMaterial({
-      color: palette.rimColor.clone().multiplyScalar(1.35),
-      side: THREE.DoubleSide
+      color: opts.rimColor.clone().multiplyScalar(opts.rimIntensity),
+      side: THREE.DoubleSide,
+      toneMapped: false
     })
   );
-  coolFill.position.set(-34, 18, -24);
-  coolFill.lookAt(0, 0, 0);
-  envScene.add(coolFill);
+  coolRim.position.set(-opts.keyPos[0] * 0.9, 20, -opts.keyPos[2] * 0.9);
+  coolRim.lookAt(0, 0, 0);
+  envScene.add(coolRim);
 
-  const rt = pmrem.fromScene(envScene, 0.035);
-  skyGeo.dispose();
-  skyMat.dispose();
+  // Ground bounce disc
+  const groundDisc = new THREE.Mesh(
+    new THREE.CircleGeometry(46, 32),
+    new THREE.MeshBasicMaterial({
+      color: opts.groundBounce.clone().multiplyScalar(opts.groundIntensity),
+      side: THREE.DoubleSide,
+      toneMapped: false
+    })
+  );
+  groundDisc.rotation.x = -Math.PI / 2;
+  groundDisc.position.y = -14;
+  envScene.add(groundDisc);
+
+  const prevToneMapping = rendererToneSafeSave(pmrem);
+  const rt = pmrem.fromScene(envScene, 0.02, 0.1, 160);
+  rendererToneSafeRestore(pmrem, prevToneMapping);
+
+  sphereGeo.dispose();
+  skyBakeMat.dispose();
+  sky.geometry.dispose();
+  sky.material.dispose();
+  sunDisc.geometry.dispose();
+  sunDisc.material.dispose();
+  coolRim.geometry.dispose();
+  coolRim.material.dispose();
+  groundDisc.geometry.dispose();
+  groundDisc.material.dispose();
+
   return rt;
+}
+
+function rendererToneSafeSave(pmrem) {
+  const r = pmrem && pmrem._renderer;
+  if (!r) return null;
+  const prev = r.toneMapping;
+  r.toneMapping = THREE.NoToneMapping;
+  return prev;
+}
+
+function rendererToneSafeRestore(pmrem, prev) {
+  const r = pmrem && pmrem._renderer;
+  if (r && prev !== null) {
+    r.toneMapping = prev;
+  }
 }

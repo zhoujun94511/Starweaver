@@ -100,21 +100,21 @@ node ../skills/game-web3d-standalone-builder/scripts/audit-standalone-html.mjs
 
 ## 核心链路验证记录
 
-记录只保留当前工程的最新一次实跑。工程目录为 `starweaver/`，交付文件为 `starweaver/dist/starweaver-1.0.0-20261112-191745.html`。
+记录只保留当前工程的最新一次实跑。工程目录为 `starweaver/`，交付文件为 `starweaver/dist/starweaver-1.0.1-20261113-154218.html`。
 
 ### Windows
 
 #### 环境
-- 日期：2026-11-12
+- 日期：2026-11-13
 - 系统：Windows 10.0.19045（win32 x64）
 - 运行时：Node.js v22.17.0，npm 10.9.2
-- 验证工程：`starweaver/`（《星织号 · Starweaver》）
+- 验证工程：`starweaver/`（《星织号 · Starweaver》1.0.1）
 
 #### 步骤记录
-1. `npm run build` → 成功输出 `dist/starweaver-1.0.0-20261112-191745.html`（版本 `1.0.0`，构建时间 `2026-11-12 19:17:45 +08:00`，`887,591` 字节 / `0.846 MB`） ✅
-2. `npm run verify` → 全 5 关原矿充足度、主线与 DAG 净缺口、支线幂等、起飞点检与离线标签检查全部通过 ✅
-3. 在 `starweaver/` 执行 `node ../skills/game-web3d-standalone-builder/scripts/audit-standalone-html.mjs` → 外部标签与远程 URL 泄露数为 `0`，体积 `887,591` 字节（`0.846 MB` ≤ `5 MB`） ✅
-4. 浏览器打开本地静态服务上的 `dist/starweaver-1.0.0-20261112-191745.html`：文档标题为 `Starweaver`，标题页为「星织号」与「开始任务」；切换语言后为「Starweaver」与「Start Mission」。画布为 WebGL 2.0，`performance.getEntriesByType('resource')` 为 `[]` ✅
+1. `npm run build` → 成功输出 `dist/starweaver-1.0.1-20261113-154218.html` 并同步 `docs/index.html`（版本 `1.0.1`，构建时间 `2026-11-13 15:42:18 +08:00`，`990,207` 字节 / `0.944 MB`） ✅
+2. `npm run verify` → 全 5 关原矿充足度、主线与 DAG 净缺口、支线幂等、起飞点检、全图 271 个物理碰撞体与 67 个交互点可达性、昼夜探针与机翼弹簧臂、工位等待与存档折叠，以及离线标签检查全部通过 ✅
+3. 在 `starweaver/` 执行 `node ../skills/game-web3d-standalone-builder/scripts/audit-standalone-html.mjs` → 外部标签与远程 URL 泄露数为 `0`，体积 `990,207` 字节（`0.944 MB` ≤ `5 MB`） ✅
+4. 浏览器打开本地静态服务上的最新单文件产物：白昼双恒星晴空 ↔ 满天星河与卡西尼星环巨行星之夜（含夜间静态 PMREM 探针交棒、Milo 自动体积光前照灯、微光星尘）、晴/阴/荒漠沙尘暴三态天气（GPU 无状态循环风沙流 + 琥珀色体积雾 + 风声滤波器联动）全部实测通过，单帧主循环耗时约 `2.09 ms`，`performance.getEntriesByType('resource')` 为 `[]` ✅
 
 #### 结论
 - 可行性：✅ 当前 Windows 环境可以完成单文件构建、数据校验，并打开中英文标题页

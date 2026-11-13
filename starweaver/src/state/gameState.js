@@ -27,7 +27,7 @@ export class GameState {
   _bindLifecycleFlush() {
     if (typeof window === 'undefined') return;
     window.addEventListener('pagehide', () => this.flushSave());
-    if (typeof document !== 'undefined') {
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) this.flushSave();
       });
@@ -52,6 +52,8 @@ export class GameState {
       : {
           lang: 'zh',
           quality: 'high',
+          timeMode: 'cycle',
+          weatherMode: 'dynamic',
           muted: false,
           guideArrow: true,
           showCompass: true,
@@ -95,6 +97,10 @@ export class GameState {
     this.stats = {
       totalCrafted: 0,
       totalGathered: 0
+    };
+    this.envClock = {
+      cyclePhase: 0.14,
+      playElapsed: 0
     };
 
     this.settings = keepSettings;
@@ -165,9 +171,11 @@ export class GameState {
     this._savePending = false;
     if (!this.storageAvailable) return false;
     try {
-      // Fold any in-flight crafting queue outputs into persisted snapshot so closing tab mid-smelt never loses inputs!
+      // Fold any in-flight crafting queue outputs & craft counters into persisted snapshot so closing tab mid-smelt never loses inputs or desyncs stats!
       const snapshotInventory = { ...this.inventory };
       const snapshotEquipment = { ...this.equipment };
+      const snapshotCraftedEver = { ...this.craftedEver };
+      const snapshotStats = { ...this.stats };
       for (const job of this.craftingQueue) {
         const rec = RECIPES.find((r) => r.id === job.recipeId);
         if (rec) {
@@ -177,6 +185,16 @@ export class GameState {
             snapshotInventory[rec.output.id] =
               (snapshotInventory[rec.output.id] || 0) + rec.output.count;
           }
+          snapshotCraftedEver[rec.output.id] =
+            (snapshotCraftedEver[rec.output.id] || 0) + rec.output.count;
+          snapshotStats.totalCrafted = (snapshotStats.totalCrafted || 0) + 1;
+        }
+      }
+
+      const snapshotRegrow = {};
+      for (const [nId, rem] of Object.entries(this.nodeRegrowTimers)) {
+        if (Number.isFinite(rem) && rem > 0.25) {
+          snapshotRegrow[nId] = Math.round(rem * 10) / 10;
         }
       }
 
@@ -186,7 +204,9 @@ export class GameState {
         inventory: snapshotInventory,
         equipment: snapshotEquipment,
         gatheredTotals: this.gatheredTotals,
-        craftedEver: this.craftedEver,
+        craftedEver: snapshotCraftedEver,
+        nodeRegrowTimers: snapshotRegrow,
+        envClock: this.envClock,
         repairs: this.repairs,
         completedLevels: this.completedLevels,
         claimedSideTasks: this.claimedSideTasks,
@@ -197,7 +217,7 @@ export class GameState {
         preflightDone: this.preflightDone,
         cosmetics: this.cosmetics,
         launchedHome: this.launchedHome,
-        stats: this.stats,
+        stats: snapshotStats,
         settings: this.settings
       };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -242,6 +262,28 @@ export class GameState {
         for (const id of Object.keys(MATERIALS)) {
           const v = Math.floor(Number(data.craftedEver[id] || 0));
           if (Number.isFinite(v) && v > 0) this.craftedEver[id] = Math.min(v, 99999);
+        }
+      }
+
+      this.nodeRegrowTimers = {};
+      if (data.nodeRegrowTimers && typeof data.nodeRegrowTimers === 'object') {
+        for (const node of RESOURCE_NODES) {
+          const rem = Number(data.nodeRegrowTimers[node.id]);
+          if (Number.isFinite(rem) && rem > 0.2) {
+            this.nodeRegrowTimers[node.id] = Math.min(rem, node.regrow || 120);
+          }
+        }
+      }
+
+      this.envClock = { cyclePhase: 0.14, playElapsed: 0 };
+      if (data.envClock && typeof data.envClock === 'object') {
+        const cp = Number(data.envClock.cyclePhase);
+        const pe = Number(data.envClock.playElapsed);
+        if (Number.isFinite(cp) && cp >= 0 && cp < 1) {
+          this.envClock.cyclePhase = cp;
+        }
+        if (Number.isFinite(pe) && pe >= 0) {
+          this.envClock.playElapsed = Math.min(pe, 1e7);
         }
       }
 
@@ -319,14 +361,24 @@ export class GameState {
 
       if (data.settings && typeof data.settings === 'object') {
         const lang = data.settings.lang === 'en' ? 'en' : 'zh';
-        const quality = ['high', 'medium', 'low'].includes(data.settings.quality)
+        const quality = ['ultra', 'high', 'medium', 'low'].includes(data.settings.quality)
           ? data.settings.quality
           : 'high';
+        const timeMode = ['cycle', 'day', 'night'].includes(data.settings.timeMode)
+          ? data.settings.timeMode
+          : 'cycle';
+        const weatherMode = ['dynamic', 'clear', 'overcast', 'sandstorm'].includes(
+          data.settings.weatherMode
+        )
+          ? data.settings.weatherMode
+          : 'dynamic';
         const boolOrDefault = (val, def = true) =>
           val === undefined ? def : Boolean(val);
         this.settings = {
           lang,
           quality,
+          timeMode,
+          weatherMode,
           muted: Boolean(data.settings.muted),
           guideArrow: boolOrDefault(data.settings.guideArrow, true),
           showCompass: boolOrDefault(data.settings.showCompass, true),
@@ -379,6 +431,18 @@ export class GameState {
     this.lastProgressTimestamp = performance.now ? performance.now() : Date.now();
   }
 
+  setEnvClock(cyclePhase, playElapsed) {
+    if (!this.envClock) {
+      this.envClock = { cyclePhase: 0.14, playElapsed: 0 };
+    }
+    if (Number.isFinite(cyclePhase)) {
+      this.envClock.cyclePhase = ((cyclePhase % 1) + 1) % 1;
+    }
+    if (Number.isFinite(playElapsed) && playElapsed >= 0) {
+      this.envClock.playElapsed = playElapsed;
+    }
+  }
+
   // --- Localization helpers ---
   get lang() {
     return this.settings.lang || 'en';
@@ -401,10 +465,24 @@ export class GameState {
   }
 
   setQuality(quality) {
-    if (!['high', 'medium', 'low'].includes(quality)) return;
+    if (!['ultra', 'high', 'medium', 'low'].includes(quality)) return;
     this.settings.quality = quality;
     this.save();
     this._emit('settings_changed', { quality });
+  }
+
+  setTimeMode(mode) {
+    if (!['cycle', 'day', 'night'].includes(mode)) return;
+    this.settings.timeMode = mode;
+    this.save();
+    this._emit('settings_changed', { timeMode: mode });
+  }
+
+  setWeatherMode(mode) {
+    if (!['dynamic', 'clear', 'overcast', 'sandstorm'].includes(mode)) return;
+    this.settings.weatherMode = mode;
+    this.save();
+    this._emit('settings_changed', { weatherMode: mode });
   }
 
   setMuted(muted) {

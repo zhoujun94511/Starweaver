@@ -85,7 +85,7 @@ node ../skills/game-web3d-standalone-builder/scripts/audit-standalone-html.mjs
 
 After a touch is detected, a left stick and a right action pad appear. One finger turns the camera. Two fingers zoom. Touch copy does not include keyboard hints.
 
-Settings can switch between Chinese and English, sound, and three graphics levels, and can continue a save, return to camp, or start over.
+Settings can switch between Chinese and English, sound, four graphics levels (Ultra, High, Medium, Low), the planetary day-night cycle (Auto, Daylight, Starry Night), and Kharis-4 desert weather (Dynamic, Clear, Overcast, Sandstorm), and can continue a save, return to camp, or start over.
 
 ## Levels
 

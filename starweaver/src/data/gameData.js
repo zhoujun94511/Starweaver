@@ -700,7 +700,7 @@ export const REPAIR_TARGETS = {
     id: 'repair_lifesupport',
     level: 3,
     requiredItem: 'life_support_unit',
-    position: { x: -3.2, y: 1.1, z: -0.6 },
+    position: { x: -3.05, y: 1.1, z: 0.72 },
     name: { en: 'Port Bio-Dome Life-Support Bay', zh: '飞船左舷生态维生舱' },
     inspectDesc: {
       en: 'Filters dust and circulates cabin coolant. Install 1x Environmental Life-Support Unit.',
@@ -734,17 +734,17 @@ export const REPAIR_TARGETS = {
 export const PREFLIGHT_CHECKS = [
   {
     id: 'check_port_strut',
-    position: { x: -4.2, z: -2.8 },
+    position: { x: -3.85, z: -3.55 },
     name: { en: 'Port Landing Gear Hydraulic Lock', zh: '左起落架液压收放锁' }
   },
   {
     id: 'check_starboard_valve',
-    position: { x: 4.2, z: -2.2 },
+    position: { x: 3.85, z: -3.55 },
     name: { en: 'Starboard Plasma Manifold Seal', zh: '右舷燃料歧管密封阀' }
   },
   {
     id: 'check_boarding_hatch',
-    position: { x: 3.1, z: 0.3 },
+    position: { x: 3.35, z: 0.45 },
     name: { en: 'Cabin Pressurization Hatch Latch', zh: '乘员舱气密舱门锁扣' }
   }
 ];

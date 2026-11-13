@@ -12,12 +12,16 @@ import {
   createFloatingBadgeTexture,
   createGlowSpriteTexture,
   createHazardStripeTexture,
+  createIndustrialSpecPlateTexture,
   createMetalHullPBR,
   createRockPBRTextures,
   createSandPBRTextures,
   createSignpostTexture,
   createSoftAOShadowTexture
 } from '../graphics/textures.js';
+import { bakeGpuPbrLibrary, applyWorldWeathering } from '../graphics/gpuMaterialBaker.js';
+import { installPcssShadows, uninstallPcssShadows } from '../graphics/shadowPcss.js';
+import { PlanarReflectionSystem } from '../graphics/planarReflection.js';
 import { createSkyDome } from '../graphics/skyDome.js';
 import {
   createAlienAgaveGeometry,
@@ -32,9 +36,10 @@ import { fbm2D, getTerrainHeight, mulberry32, smoothstep, clamp } from '../utils
 import { mergeTransformedGeometries } from '../utils/geometryBatcher.js';
 
 export class WorldBuilder {
-  constructor(scene, state) {
+  constructor(scene, state, renderer = null) {
     this.scene = scene;
     this.state = state;
+    this.renderer = renderer;
 
     this.groups = {
       static: new THREE.Group(),
@@ -80,22 +85,44 @@ export class WorldBuilder {
     this.furnaceLight = null;
     this._sunOffset = new THREE.Vector3(42, 64, 28);
     this._lastShadowFocusX = NaN;
+    this._lastShadowFocusY = NaN;
     this._lastShadowFocusZ = NaN;
     this._shadowRefreshCooldown = 0;
     this._shadowDirty = true;
+    this._pcssFailedOnDriver = false;
 
-    const sandPBR = createSandPBRTextures(256);
-    const rockPBR = createRockPBRTextures(128);
-    const metalPBR = createMetalHullPBR(256);
+    const isMobileInit = this.isCoarseMobileDevice();
+    this.pbrLibrary = renderer
+      ? bakeGpuPbrLibrary(renderer, { isMobile: isMobileInit })
+      : null;
+
+    const sandFallback = this.pbrLibrary ? null : createSandPBRTextures(256);
+    const rockFallback = this.pbrLibrary ? null : createRockPBRTextures(128);
+    const metalFallback = this.pbrLibrary ? null : createMetalHullPBR(256);
 
     this.textures = {
-      sandMap: sandPBR.map,
-      sandNormal: sandPBR.normalMap,
-      sandRoughness: sandPBR.roughnessMap,
-      rockMap: rockPBR.map,
-      rockNormal: rockPBR.normalMap,
-      metalMap: metalPBR.map,
-      metalNormal: metalPBR.normalMap,
+      sandMap: this.pbrLibrary ? this.pbrLibrary.sand.map : sandFallback.map,
+      sandNormal: this.pbrLibrary ? this.pbrLibrary.sand.normalMap : sandFallback.normalMap,
+      sandRoughness: this.pbrLibrary ? this.pbrLibrary.sand.ormMap : sandFallback.roughnessMap,
+      sandOrm: this.pbrLibrary ? this.pbrLibrary.sand.ormMap : null,
+      rockMap: this.pbrLibrary ? this.pbrLibrary.rock.map : rockFallback.map,
+      rockNormal: this.pbrLibrary ? this.pbrLibrary.rock.normalMap : rockFallback.normalMap,
+      rockOrm: this.pbrLibrary ? this.pbrLibrary.rock.ormMap : null,
+      metalMap: this.pbrLibrary ? this.pbrLibrary.hull_white.map : metalFallback.map,
+      metalNormal: this.pbrLibrary ? this.pbrLibrary.hull_white.normalMap : metalFallback.normalMap,
+      metalOrm: this.pbrLibrary ? this.pbrLibrary.hull_white.ormMap : null,
+      titaniumMap: this.pbrLibrary ? this.pbrLibrary.titanium_dark.map : null,
+      titaniumNormal: this.pbrLibrary ? this.pbrLibrary.titanium_dark.normalMap : null,
+      titaniumOrm: this.pbrLibrary ? this.pbrLibrary.titanium_dark.ormMap : null,
+      orangeMap: this.pbrLibrary ? this.pbrLibrary.painted_orange.map : null,
+      orangeNormal: this.pbrLibrary ? this.pbrLibrary.painted_orange.normalMap : null,
+      orangeOrm: this.pbrLibrary ? this.pbrLibrary.painted_orange.ormMap : null,
+      copperMap: this.pbrLibrary ? this.pbrLibrary.brushed_copper.map : null,
+      copperNormal: this.pbrLibrary ? this.pbrLibrary.brushed_copper.normalMap : null,
+      copperOrm: this.pbrLibrary ? this.pbrLibrary.brushed_copper.ormMap : null,
+      deckMap: this.pbrLibrary ? this.pbrLibrary.station_deck.map : null,
+      deckNormal: this.pbrLibrary ? this.pbrLibrary.station_deck.normalMap : null,
+      deckOrm: this.pbrLibrary ? this.pbrLibrary.station_deck.ormMap : null,
       hazard: createHazardStripeTexture(),
       glowSprite: createGlowSpriteTexture(128, '#fffdf5', '#ffcb80'),
       aoShadow: createSoftAOShadowTexture(128)
@@ -104,14 +131,17 @@ export class WorldBuilder {
       map: this.textures.aoShadow,
       transparent: true,
       depthWrite: false,
-      opacity: 0.72
+      opacity: 0.62
     });
+
+    this.planarReflection = renderer ? new PlanarReflectionSystem(renderer, scene) : null;
 
     this.skyDome = createSkyDome();
     this.scene.add(this.skyDome.group);
 
     this._setupLightingAndSky();
     this._buildTerrain();
+    this._buildBrinePools();
     this._buildDistantHorizonMesas();
     this._buildElevatedSkyPlatforms();
     this._buildInstancedScenery();
@@ -124,20 +154,28 @@ export class WorldBuilder {
     this._buildResourceNodes();
     this._flushStaticBatches();
     this._buildDustAndSelectionEffects();
+
+    if (this.planarReflection) {
+      this.planarReflection.registerExcludedObject(this.groups.effects);
+      for (const sb of this.stationBadges) {
+        if (sb.sprite) this.planarReflection.registerExcludedObject(sb.sprite);
+      }
+    }
   }
 
   _setupLightingAndSky() {
-    this.scene.background = new THREE.Color('#edc095');
-    this.scene.fog = new THREE.FogExp2('#edc095', 0.0034);
+    this.scene.background = new THREE.Color('#d89c72');
+    // Subtle safety distance haze; primary aerial perspective & sun shafts come from volumetric pass!
+    this.scene.fog = new THREE.FogExp2('#d89c72', 0.0012);
 
-    // Balanced warm sunlight + cool azure sky bounce + warm sand ground bounce
-    this.hemiLight = new THREE.HemisphereLight('#d8ecff', '#b86d43', 0.72);
+    // Sculptural warm-sun / cool-shadow chiaroscuro ratio (prevents flat ambient washout)
+    this.hemiLight = new THREE.HemisphereLight('#bfdfff', '#9e5632', 0.54);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight('#fff1d6', 2.05);
+    this.sunLight = new THREE.DirectionalLight('#fff0d2', 2.55);
     this.sunLight.position.copy(this._sunOffset);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(1536, 1536);
+    this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 10;
     this.sunLight.shadow.camera.far = 165;
     // Tight 36m radius shadow frustum centered around Milo (snapped to texel grid to prevent shimmer!)
@@ -146,50 +184,16 @@ export class WorldBuilder {
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
     this.sunLight.shadow.camera.bottom = -d;
-    this.sunLight.shadow.bias = -0.0004;
-    this.sunLight.shadow.normalBias = 0.025;
+    this.sunLight.shadow.bias = -0.00028;
+    this.sunLight.shadow.normalBias = 0.022;
+    this.sunLight.shadow.radius = 1.15;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    // Subtle cool rim directional light from opposite horizon for 3D form separation
-    const rimLight = new THREE.DirectionalLight('#7cc8ff', 0.42);
-    rimLight.position.set(-45, 26, -38);
-    this.scene.add(rimLight);
-
-    // Twin alien suns with soft glowing corona sprites
-    const sunPos = new THREE.Vector3(115, 98, 68);
-    const sunDisc = new THREE.Mesh(
-      new THREE.SphereGeometry(5.8, 24, 20),
-      new THREE.MeshBasicMaterial({ color: '#fffbe8', fog: false })
-    );
-    sunDisc.position.copy(sunPos);
-    const sunHalo = new THREE.Sprite(
-      new THREE.SpriteMaterial({
-        map: this.textures.glowSprite,
-        color: '#ffdf9e',
-        transparent: true,
-        opacity: 0.85,
-        blending: THREE.AdditiveBlending,
-        fog: false,
-        depthWrite: false
-      })
-    );
-    sunHalo.position.copy(sunPos);
-    sunHalo.scale.set(38, 38, 1);
-    this.groups.static.add(sunDisc, sunHalo);
-
-    const moonPos = new THREE.Vector3(84, 76, 98);
-    const companionMoon = new THREE.Mesh(
-      new THREE.SphereGeometry(3.1, 20, 18),
-      new THREE.MeshStandardMaterial({
-        color: '#ffd7ba',
-        emissive: '#995233',
-        emissiveIntensity: 0.6,
-        fog: false
-      })
-    );
-    companionMoon.position.copy(moonPos);
-    this.groups.static.add(companionMoon);
+    // Cool azure rim directional light from opposite horizon for crisp 3D edge separation
+    this.rimLight = new THREE.DirectionalLight('#6ec4ff', 0.52);
+    this.rimLight.position.set(-45, 26, -38);
+    this.scene.add(this.rimLight);
   }
 
   isCoarseMobileDevice() {
@@ -217,8 +221,10 @@ export class WorldBuilder {
       renderer.setPixelRatio(1.0);
     } else if (quality === 'medium') {
       renderer.setPixelRatio(Math.min(nativeDpr, isMobile ? 1.45 : 1.5));
-    } else {
+    } else if (quality === 'ultra') {
       renderer.setPixelRatio(Math.min(nativeDpr, isMobile ? 2.0 : 2.5));
+    } else {
+      renderer.setPixelRatio(Math.min(nativeDpr, isMobile ? 1.85 : 2.0));
     }
   }
 
@@ -237,18 +243,43 @@ export class WorldBuilder {
         ? 1
         : Math.min(isMobile ? 4 : 8, hwAniso);
 
-    for (const tex of [
-      this.textures.sandMap,
-      this.textures.sandNormal,
-      this.textures.rockMap,
-      this.textures.rockNormal,
-      this.textures.metalMap,
-      this.textures.metalNormal
-    ]) {
-      if (tex && tex.anisotropy !== maxAniso) {
-        tex.anisotropy = maxAniso;
-        tex.needsUpdate = true;
+    if (this.pbrLibrary) {
+      this.pbrLibrary.setAnisotropy(maxAniso);
+    } else {
+      for (const tex of [
+        this.textures.sandMap,
+        this.textures.sandNormal,
+        this.textures.rockMap,
+        this.textures.rockNormal,
+        this.textures.metalMap,
+        this.textures.metalNormal
+      ]) {
+        if (tex && tex.anisotropy !== maxAniso) {
+          tex.anisotropy = maxAniso;
+          tex.needsUpdate = true;
+        }
       }
+    }
+
+    if (this.planarReflection) {
+      this.planarReflection.setQuality(quality, isMobile);
+    }
+
+    // Install contact-hardening PCSS shadows on desktop High / Ultra; fallback cleanly on Low/Medium/Mobile or driver error
+    const wantPcss = !isMobile && !this._pcssFailedOnDriver && (quality === 'high' || quality === 'ultra');
+    let shadowChunkChanged = false;
+    if (wantPcss) {
+      shadowChunkChanged = installPcssShadows({
+        frustumSize: 72.0,
+        depthSpan: 155.0,
+        taps: quality === 'ultra' ? 16 : 12,
+        blockerTaps: 8
+      });
+    } else {
+      shadowChunkChanged = uninstallPcssShadows();
+    }
+    if (shadowChunkChanged) {
+      this._markShadowMaterialsNeedsUpdate();
     }
 
     if (quality === 'low') {
@@ -259,7 +290,6 @@ export class WorldBuilder {
     } else if (quality === 'medium') {
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.autoUpdate = false;
-      // PCFShadowMap (4-tap) on mobile vs 9-tap PCFSoftShadowMap cuts fragment shadow sampling by >55%!
       renderer.shadowMap.type = isMobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
       this.sunLight.castShadow = true;
       this.sunLight.shadow.mapSize.set(1024, 1024);
@@ -274,7 +304,7 @@ export class WorldBuilder {
       renderer.shadowMap.autoUpdate = false;
       renderer.shadowMap.type = isMobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
       this.sunLight.castShadow = true;
-      const hiMap = isMobile ? 1024 : 2048;
+      const hiMap = isMobile ? 1024 : quality === 'ultra' ? 3072 : 2048;
       this.sunLight.shadow.mapSize.set(hiMap, hiMap);
       if (this.sunLight.shadow.map) {
         this.sunLight.shadow.map.dispose();
@@ -285,23 +315,58 @@ export class WorldBuilder {
     }
   }
 
+  _markShadowMaterialsNeedsUpdate() {
+    const visited = new Set();
+    this.scene.traverse((obj) => {
+      if (!obj || !obj.material) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) {
+        if (!m || visited.has(m)) continue;
+        visited.add(m);
+        if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial || m.isMeshLambertMaterial || m.isMeshPhongMaterial) {
+          m.needsUpdate = true;
+        }
+      }
+    });
+  }
+
+  fallbackDisablePcss(renderer) {
+    if (this._pcssFailedOnDriver) return;
+    this._pcssFailedOnDriver = true;
+    if (uninstallPcssShadows()) {
+      if (renderer && renderer.shadowMap) {
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      }
+      this._markShadowMaterialsNeedsUpdate();
+      this._shadowDirty = true;
+    }
+  }
+
   updateShadowFollow(dt, focusPos, renderer, forceEveryFrame = false) {
     if (!renderer || !renderer.shadowMap.enabled || !this.sunLight.castShadow) return;
 
     const fx = focusPos ? focusPos.x : 0;
+    const fy = focusPos ? focusPos.y || 0 : 0;
     const fz = focusPos ? focusPos.z : 0;
-    // Snap shadow camera target to 2.0m grid steps to prevent sub-texel shadow edge swimming!
+    // Snap shadow camera target in 3D (X, Y, Z) to 2.0m grid steps so both Desert Basin (Y~0)
+    // and Homeworld Ending Meadow (Y=420) receive crisp, shimmer-free real-time shadows!
     const snapX = Math.round(fx * 0.5) * 2.0;
+    const snapY = Math.round(fy * 0.5) * 2.0;
     const snapZ = Math.round(fz * 0.5) * 2.0;
 
-    if (snapX !== this._lastShadowFocusX || snapZ !== this._lastShadowFocusZ) {
+    if (
+      snapX !== this._lastShadowFocusX ||
+      snapY !== this._lastShadowFocusY ||
+      snapZ !== this._lastShadowFocusZ
+    ) {
       this._lastShadowFocusX = snapX;
+      this._lastShadowFocusY = snapY;
       this._lastShadowFocusZ = snapZ;
-      this.sunLight.target.position.set(snapX, 0, snapZ);
+      this.sunLight.target.position.set(snapX, snapY, snapZ);
       this.sunLight.target.updateMatrixWorld();
       this.sunLight.position.set(
         snapX + this._sunOffset.x,
-        this._sunOffset.y,
+        snapY + this._sunOffset.y,
         snapZ + this._sunOffset.z
       );
       this._shadowDirty = true;
@@ -391,46 +456,81 @@ export class WorldBuilder {
     const isMobileTerrain = this.isCoarseMobileDevice();
     const mat = new THREE.MeshStandardMaterial({
       map: this.textures.sandMap,
+      aoMap: this.textures.sandOrm,
+      aoMapIntensity: 0.85,
       normalMap: this.textures.sandNormal,
-      normalScale: new THREE.Vector2(0.7, 0.7),
+      normalScale: new THREE.Vector2(0.88, 0.88),
       roughnessMap: isMobileTerrain ? null : this.textures.sandRoughness,
       vertexColors: true,
-      roughness: 0.9,
-      metalness: 0.03
+      roughness: 0.96,
+      metalness: 0.04
     });
 
-    // Dual-scale rotated UV sampling in shader to completely eliminate repetitive grid tiling!
-    // On mobile GPUs, keep dual-scale Albedo to break tiling while using single-tap Normal map (-40% terrain texture bandwidth!)
+    // Multi-scale rotated UV sand + automatic slope stratified rock blend + grazing sun mica sparkle!
     mat.customProgramCacheKey = () =>
-      isMobileTerrain ? 'terrain_sand_mobile' : 'terrain_sand_desktop';
+      isMobileTerrain ? 'terrain_sand_rock_mobile_v2' : 'terrain_sand_rock_desktop_v2';
     mat.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <map_fragment>',
-        `
-        #ifdef USE_MAP
-          vec2 uvA = vMapUv;
-          vec2 uvB = mat2(0.80, -0.60, 0.60, 0.80) * (vMapUv * 0.37) + vec2(0.17, 0.43);
-          vec4 sampA = texture2D(map, uvA);
-          vec4 sampB = texture2D(map, uvB);
-          diffuseColor *= mix(sampA, sampB, 0.48);
-        #endif
-        `
-      );
-      if (!isMobileTerrain) {
-        shader.fragmentShader = shader.fragmentShader.replace(
-          '#include <normal_fragment_maps>',
+      shader.uniforms.uRockMap = { value: this.textures.rockMap };
+      shader.uniforms.uRockNormal = { value: this.textures.rockNormal };
+      shader.uniforms.uSunDirW = { value: this._sunOffset.clone().normalize() };
+
+      shader.vertexShader =
+        `varying vec3 vTerWorldPos;\nvarying vec3 vTerWorldNrm;\n` +
+        shader.vertexShader.replace(
+          '#include <worldpos_vertex>',
+          `#include <worldpos_vertex>
+          vTerWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+          vTerWorldNrm = normalize(mat3(modelMatrix) * normal);`
+        );
+
+      shader.fragmentShader =
+        `varying vec3 vTerWorldPos;\nvarying vec3 vTerWorldNrm;\nuniform sampler2D uRockMap;\nuniform sampler2D uRockNormal;\nuniform vec3 uSunDirW;\n` +
+        shader.fragmentShader.replace(
+          '#include <map_fragment>',
           `
-          #ifdef USE_NORMALMAP_TANGENTSPACE
-            vec2 nUvA = vNormalMapUv;
-            vec2 nUvB = mat2(0.80, -0.60, 0.60, 0.80) * (vNormalMapUv * 0.37) + vec2(0.17, 0.43);
-            vec3 mapN1 = texture2D(normalMap, nUvA).xyz * 2.0 - 1.0;
-            vec3 mapN2 = texture2D(normalMap, nUvB).xyz * 2.0 - 1.0;
-            vec3 mapN = normalize(mix(mapN1, mapN2, 0.48));
-            mapN.xy *= normalScale;
-            normal = normalize(tbn * mapN);
+          float terSlope = smoothstep(0.10, 0.42, 1.0 - clamp(normalize(vTerWorldNrm).y, 0.0, 1.0));
+          #ifdef USE_MAP
+            vec2 uvA = vMapUv;
+            vec2 uvB = mat2(0.80, -0.60, 0.60, 0.80) * (vMapUv * 0.37) + vec2(0.17, 0.43);
+            vec4 sampA = texture2D(map, uvA);
+            vec4 sampB = texture2D(map, uvB);
+            vec4 sandCol = mix(sampA, sampB, 0.46);
+            vec4 rockCol = texture2D(uRockMap, vTerWorldPos.xz * 0.14);
+            diffuseColor *= mix(sandCol, rockCol, terSlope * 0.85);
           #endif
           `
         );
+
+      if (!isMobileTerrain) {
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            '#include <normal_fragment_maps>',
+            `
+            #ifdef USE_NORMALMAP_TANGENTSPACE
+              vec2 nUvA = vNormalMapUv;
+              vec2 nUvB = mat2(0.80, -0.60, 0.60, 0.80) * (vNormalMapUv * 0.37) + vec2(0.17, 0.43);
+              vec3 mapN1 = texture2D(normalMap, nUvA).xyz * 2.0 - 1.0;
+              vec3 mapN2 = texture2D(normalMap, nUvB).xyz * 2.0 - 1.0;
+              vec3 sandN = normalize(mix(mapN1, mapN2, 0.46));
+              vec3 rockN = texture2D(uRockNormal, vTerWorldPos.xz * 0.14).xyz * 2.0 - 1.0;
+              vec3 mapN = normalize(mix(sandN, rockN, terSlope * 0.85));
+              mapN.xy *= normalScale;
+              normal = normalize(tbn * mapN);
+            #endif
+            `
+          )
+          .replace(
+            '#include <lights_fragment_end>',
+            `#include <lights_fragment_end>
+            {
+              // Subtle crystalline quartz mica micro-glints on sunlit sand ripples
+              vec3 viewD = normalize(cameraPosition - vTerWorldPos);
+              vec3 halfV = normalize(uSunDirW + viewD);
+              float glintHash = fract(sin(dot(floor(vTerWorldPos.xz * 26.0), vec2(127.1, 311.7))) * 43758.5453);
+              float glint = step(0.965, glintHash) * pow(max(dot(normalize(vTerWorldNrm), halfV), 0.0), 48.0) * (1.0 - terSlope);
+              reflectedLight.directSpecular += vec3(1.0, 0.90, 0.72) * glint * 0.85;
+            }`
+          );
       }
     };
 
@@ -439,17 +539,59 @@ export class WorldBuilder {
     this.groups.static.add(terrain);
   }
 
+  _buildBrinePools() {
+    if (!this.planarReflection) return;
+
+    // 1. Central Crash Basin Crystalline Coolant & Groundwater Seep Pool (front-port of Starweaver)
+    // Walkable shallow mirror seep (0.025m) reflecting Starweaver hull, cockpit, Fabricator & Kharis clouds!
+    const hubPool = this.planarReflection.createBrinePool({
+      x: -4.45,
+      y: getTerrainHeight(-4.45, 7.65, false) + 0.026,
+      z: 7.65,
+      radiusX: 3.65,
+      radiusZ: 2.75,
+      rotationY: 0.34,
+      tintDeep: '#0d3648',
+      tintRim: '#32c8dc',
+      sandColor: '#bd7f54',
+      normalMap: this.textures.sandNormal
+    });
+    this.groups.static.add(hubPool);
+
+    // 2. South Dry Canyon Endothermic Brine Pool (matching Botanist Lin's log & region lore!)
+    const canyonY = getTerrainHeight(-2.2, 38.5, false) + 0.04;
+    const canyonPool = this.planarReflection.createBrinePool({
+      x: -2.2,
+      y: canyonY,
+      z: 38.5,
+      radiusX: 4.5,
+      radiusZ: 3.45,
+      rotationY: -0.22,
+      tintDeep: '#0a423e',
+      tintRim: '#3ef2c8',
+      sandColor: '#9e543d',
+      normalMap: this.textures.sandNormal
+    });
+    this.groups.static.add(canyonPool);
+  }
+
   _buildDistantHorizonMesas() {
     // 1. Sculpted Stratified Desert Mesas & Canyon Cliff Walls with baked gully AO vertex colors!
     const rand = mulberry32(772211);
-    const mesaMat = new THREE.MeshStandardMaterial({
-      map: this.textures.rockMap,
-      normalMap: this.textures.rockNormal,
-      normalScale: new THREE.Vector2(1.25, 1.25),
-      vertexColors: true,
-      roughness: 0.85,
-      metalness: 0.04
-    });
+    const mesaMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: this.textures.rockMap,
+        aoMap: this.textures.rockOrm,
+        aoMapIntensity: 0.9,
+        roughnessMap: this.textures.rockOrm,
+        normalMap: this.textures.rockNormal,
+        normalScale: new THREE.Vector2(1.35, 1.35),
+        vertexColors: true,
+        roughness: 0.96,
+        metalness: 0.05
+      }),
+      { dustAmount: 0.24, macroContrast: 0.14, groundSkirt: 0.42, keyTag: 'mesa_rock_v2' }
+    );
 
     // Pre-sculpt 5 distinct geological mesa archetypes to share cleanly across horizon & canyon walls
     const mesaArchetypes = [
@@ -537,7 +679,9 @@ export class WorldBuilder {
         id: `canyon_cliff_${cw.x}_${cw.z}`,
         x: cw.x,
         z: cw.z,
-        radius: 8.2 * Math.max(cw.sx, cw.sz)
+        radius: 9.2 * Math.max(cw.sx, cw.sz),
+        maxY: 24.0,
+        occluder: true
       });
     }
 
@@ -551,8 +695,8 @@ export class WorldBuilder {
     });
     // Arch pier colliders at z = ±7.6 (middle corridor z in [-5, 5] is completely open!)
     this.colliders.push(
-      { id: 'east_arch_pier_n', x: 26.5, z: -7.6, radius: 1.85 },
-      { id: 'east_arch_pier_s', x: 26.5, z: 7.6, radius: 1.85 }
+      { id: 'east_arch_pier_n', x: 26.5, z: -7.6, radius: 2.05, maxY: eastY + 8.5, occluder: true },
+      { id: 'east_arch_pier_s', x: 26.5, z: 7.6, radius: 2.05, maxY: eastY + 8.5, occluder: true }
     );
 
     const southArchGeo = createSandstoneArchGeometry(16.0, 9.2, 2.15, 922);
@@ -562,8 +706,8 @@ export class WorldBuilder {
       position: [0, southY - 0.5, 27.5]
     });
     this.colliders.push(
-      { id: 'south_arch_pier_w', x: -8.0, z: 27.5, radius: 1.9 },
-      { id: 'south_arch_pier_e', x: 8.0, z: 27.5, radius: 1.9 }
+      { id: 'south_arch_pier_w', x: -8.0, z: 27.5, radius: 2.1, maxY: southY + 9.0, occluder: true },
+      { id: 'south_arch_pier_e', x: 8.0, z: 27.5, radius: 2.1, maxY: southY + 9.0, occluder: true }
     );
 
     const mergedCanyonAndArches = mergeTransformedGeometries(shadowMesaEntries);
@@ -651,10 +795,11 @@ export class WorldBuilder {
         });
       } else {
         const spireGeo = createStratifiedMesaGeometry(
-          plat.radius * 0.86,
-          plat.radius * 1.22,
+          plat.radius * 0.92,
+          plat.radius * 1.18,
           colHeight,
-          710 + idx * 37
+          710 + idx * 37,
+          true
         );
         tempGeos.push(spireGeo);
         sandstoneEntries.push({
@@ -728,15 +873,21 @@ export class WorldBuilder {
       createSculptedBoulderGeometry(205, 'slab'),
       createSculptedBoulderGeometry(309, 'hoodoo')
     ];
-    const rockMat = new THREE.MeshStandardMaterial({
-      map: this.textures.rockMap,
-      normalMap: this.textures.rockNormal,
-      normalScale: new THREE.Vector2(0.95, 0.95),
-      vertexColors: true,
-      color: '#d99a73',
-      roughness: 0.86,
-      metalness: 0.05
-    });
+    const rockMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: this.textures.rockMap,
+        aoMap: this.textures.rockOrm,
+        aoMapIntensity: 0.88,
+        roughnessMap: this.textures.rockOrm,
+        normalMap: this.textures.rockNormal,
+        normalScale: new THREE.Vector2(1.1, 1.1),
+        vertexColors: true,
+        color: '#d99a73',
+        roughness: 0.95,
+        metalness: 0.05
+      }),
+      { dustAmount: 0.28, macroContrast: 0.12, groundSkirt: 0.45, keyTag: 'boulder_rock_v2' }
+    );
 
     const buckets = [[], [], []];
     const floraPlacements = [];
@@ -810,14 +961,14 @@ export class WorldBuilder {
         dummy.updateMatrix();
         inst.setMatrixAt(idx, dummy.matrix);
 
-        if (p.scaleXZ >= 1.05) {
-          this.colliders.push({
-            id: `rock_${bIdx}_${p.id}`,
-            x: p.x,
-            z: p.z,
-            radius: p.scaleXZ * 0.76
-          });
-        }
+        this.colliders.push({
+          id: `rock_${bIdx}_${p.id}`,
+          x: p.x,
+          z: p.z,
+          radius: p.scaleXZ * 0.88,
+          maxY: p.y + p.scaleY * 1.15,
+          occluder: p.scaleXZ >= 1.45
+        });
       });
       inst.instanceMatrix.needsUpdate = true;
       this.groups.static.add(inst);
@@ -850,23 +1001,58 @@ export class WorldBuilder {
   }
 
   _buildStations() {
-    const steelMat = new THREE.MeshStandardMaterial({
-      map: this.textures.metalMap,
-      normalMap: this.textures.metalNormal,
-      color: '#526075',
-      roughness: 0.42,
-      metalness: 0.68
-    });
-    const darkIronMat = new THREE.MeshStandardMaterial({
-      color: '#262f3d',
-      roughness: 0.5,
-      metalness: 0.72
-    });
+    const steelMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: this.textures.metalMap,
+        aoMap: this.textures.metalOrm,
+        aoMapIntensity: 0.95,
+        roughnessMap: this.textures.metalOrm,
+        metalnessMap: this.textures.metalOrm,
+        normalMap: this.textures.metalNormal,
+        normalScale: new THREE.Vector2(0.85, 0.85),
+        color: '#8899b0',
+        roughness: 1.0,
+        metalness: 0.85
+      }),
+      { dustAmount: 0.18, macroContrast: 0.10, groundSkirt: 0.35, keyTag: 'station_steel_v2' }
+    );
+    const darkIronMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: this.textures.titaniumMap || null,
+        aoMap: this.textures.titaniumOrm || null,
+        aoMapIntensity: 0.9,
+        roughnessMap: this.textures.titaniumOrm || null,
+        metalnessMap: this.textures.titaniumOrm || null,
+        normalMap: this.textures.titaniumNormal || null,
+        color: this.textures.titaniumMap ? '#ffffff' : '#262f3d',
+        roughness: this.textures.titaniumOrm ? 1.0 : 0.5,
+        metalness: this.textures.titaniumOrm ? 1.0 : 0.72
+      }),
+      { dustAmount: 0.22, macroContrast: 0.08, groundSkirt: 0.4, keyTag: 'station_iron_v2' }
+    );
     const copperMat = new THREE.MeshStandardMaterial({
-      color: '#de8142',
-      roughness: 0.26,
-      metalness: 0.85
+      map: this.textures.copperMap || null,
+      aoMap: this.textures.copperOrm || null,
+      roughnessMap: this.textures.copperOrm || null,
+      metalnessMap: this.textures.copperOrm || null,
+      normalMap: this.textures.copperNormal || null,
+      color: this.textures.copperMap ? '#ffffff' : '#de8142',
+      roughness: this.textures.copperOrm ? 1.0 : 0.26,
+      metalness: this.textures.copperOrm ? 1.0 : 0.85
     });
+    const deckPlateMat = applyWorldWeathering(
+      new THREE.MeshStandardMaterial({
+        map: this.textures.deckMap || this.textures.metalMap,
+        aoMap: this.textures.deckOrm || null,
+        roughnessMap: this.textures.deckOrm || null,
+        metalnessMap: this.textures.deckOrm || null,
+        normalMap: this.textures.deckNormal || this.textures.metalNormal,
+        color: this.textures.deckMap ? '#ffffff' : '#4a5568',
+        roughness: this.textures.deckOrm ? 1.0 : 0.48,
+        metalness: this.textures.deckOrm ? 1.0 : 0.78
+      }),
+      { dustAmount: 0.32, macroContrast: 0.1, groundSkirt: 0.5, keyTag: 'station_deck_v2' }
+    );
 
     // 1. Detailed Solar Smelting Furnace (East-side of Hub)
     const fCfg = WORLD_FACILITIES.furnace;
@@ -954,9 +1140,39 @@ export class WorldBuilder {
     this.furnaceCoreMesh.position.set(0, 1.08, 0.92);
     fGroup.add(this.furnaceCoreMesh);
 
-    this.furnaceLight = new THREE.PointLight('#ff8c2b', 1.8, 7.5);
+    this.furnaceLight = new THREE.PointLight('#ff8c2b', 2.4, 9.5);
     this.furnaceLight.position.set(0, 1.25, 1.45);
     fGroup.add(this.furnaceLight);
+
+    // Industrial diamond-tread operator deck + riveted thermal hazard plaque on Solar Furnace
+    const fDeck = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.15, 2.28, 0.08, 24),
+      deckPlateMat
+    );
+    fDeck.position.y = 0.04;
+    fDeck.receiveShadow = true;
+    fGroup.add(fDeck);
+
+    const fPlateTex = createIndustrialSpecPlateTexture({
+      header: 'SOLAR CRUCIBLE',
+      code: 'UNIT SC-1420 · KHARIS',
+      specA: 'CORE TEMP: 1,420 C',
+      specB: 'CAUTION: MOLTEN SLAG',
+      accent: '#ffad3b'
+    });
+    const fPlate = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.68, 0.40),
+      new THREE.MeshStandardMaterial({
+        map: fPlateTex,
+        roughness: 0.42,
+        metalness: 0.65,
+        polygonOffset: true,
+        polygonOffsetFactor: -2
+      })
+    );
+    fPlate.position.set(0.88, 1.18, 0.84);
+    fPlate.rotation.y = 0.68;
+    fGroup.add(fPlate);
 
     // Floating holographic Station Name Badge above Solar Furnace!
     const furnaceBadgeTex = createFloatingBadgeTexture('太阳能熔炼炉', '原矿 → 铁板/铜锭/透镜', '#ffad42');
@@ -1078,6 +1294,39 @@ export class WorldBuilder {
     this.fabricatorArm.add(post, joint, boom, emitterHead, this.fabricatorLaser);
     fabGroup.add(this.fabricatorArm);
 
+    // Industrial diamond-tread platform + CAD spec plaque + cyan holographic fill light
+    const fabDeck = new THREE.Mesh(
+      new RoundedBoxGeometry(3.25, 0.08, 2.55, 2, 0.03),
+      deckPlateMat
+    );
+    fabDeck.position.y = 0.04;
+    fabDeck.receiveShadow = true;
+    fabGroup.add(fabDeck);
+
+    const fabPlateTex = createIndustrialSpecPlateTexture({
+      header: 'PRECISION GANTRY',
+      code: 'UNIT FAB-02 · LASER CAD',
+      specA: 'TOLERANCE: 0.005 MM',
+      specB: 'CLASS-IV PHOTONIC BEAM',
+      accent: '#4ee8ff'
+    });
+    const fabPlate = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.76, 0.44),
+      new THREE.MeshStandardMaterial({
+        map: fabPlateTex,
+        roughness: 0.4,
+        metalness: 0.68,
+        polygonOffset: true,
+        polygonOffsetFactor: -2
+      })
+    );
+    fabPlate.position.set(0, 0.52, 0.935);
+    fabGroup.add(fabPlate);
+
+    const fabLight = new THREE.PointLight('#3be8ff', 1.45, 7.2);
+    fabLight.position.set(0.15, 1.55, 0.45);
+    fabGroup.add(fabLight);
+
     // Floating holographic Station Name Badge above Fabrication Station!
     const fabBadgeTex = createFloatingBadgeTexture('精密制造台', '板材/锭 → 飞船修复总成', '#5ce8ff');
     const fabBadgeMat = new THREE.SpriteMaterial({
@@ -1102,7 +1351,12 @@ export class WorldBuilder {
     });
 
     this.groups.dynamic.add(fabGroup);
-    this.colliders.push({ id: 'fabricator', x: fabCfg.x, z: fabCfg.z, radius: fabCfg.radius });
+    // Capsule-like 3-circle collider matching the 2.6m x 1.85m rectangular workbench so corners never clip!
+    this.colliders.push(
+      { id: 'fabricator', x: fabCfg.x, z: fabCfg.z, radius: 1.18 },
+      { id: 'fabricator_w', x: fabCfg.x - 0.72, z: fabCfg.z, radius: 1.02 },
+      { id: 'fabricator_e', x: fabCfg.x + 0.72, z: fabCfg.z, radius: 1.02 }
+    );
 
     // 3. Outpost Field Purifier & Fabricator in Dry Canyon (South)
     const pCfg = WORLD_FACILITIES.outpost_purifier;
@@ -1223,6 +1477,7 @@ export class WorldBuilder {
       g.add(board);
 
       this.groups.static.add(g);
+      this.colliders.push({ id: `signpost_${s.x}_${s.z}`, x: s.x, z: s.z, radius: 0.45 });
     }
 
     const beaconRoutes = [
@@ -1252,6 +1507,7 @@ export class WorldBuilder {
           geo: bulbGeo,
           position: [bx, by + 0.88, bz]
         });
+        this.colliders.push({ id: `beacon_${bx}_${bz}`, x: bx, z: bz, radius: 0.24 });
       }
       const mergedBulbs = mergeTransformedGeometries(bulbEntries);
       if (mergedBulbs) {
@@ -1396,13 +1652,25 @@ export class WorldBuilder {
       this.groups.dynamic.add(gateGroup);
       this.gateBarriers.set(rId, { group: gateGroup, shield: energyShield, baseY: gy });
 
-      this.colliders.push({
-        id: `gate_${rId}`,
-        x: gb.x,
-        z: gb.z,
-        radius: 3.6,
-        activeFn: () => !this.state.isRegionUnlocked(rId)
-      });
+      const gateActiveFn = () => !this.state.isRegionUnlocked(rId);
+      const isEastWest = Math.abs(gb.x) > Math.abs(gb.z);
+      this.colliders.push(
+        { id: `gate_${rId}`, x: gb.x, z: gb.z, radius: 3.6, activeFn: gateActiveFn },
+        {
+          id: `gate_${rId}_p1`,
+          x: gb.x + (isEastWest ? 0 : -3.4),
+          z: gb.z + (isEastWest ? -3.4 : 0),
+          radius: 0.62,
+          activeFn: gateActiveFn
+        },
+        {
+          id: `gate_${rId}_p2`,
+          x: gb.x + (isEastWest ? 0 : 3.4),
+          z: gb.z + (isEastWest ? 3.4 : 0),
+          radius: 0.62,
+          activeFn: gateActiveFn
+        }
+      );
     }
   }
 
@@ -1458,10 +1726,15 @@ export class WorldBuilder {
     const obsBaseGeo = new THREE.CylinderGeometry(1.12, 1.48, 1.65, 14);
 
     for (const px of [-38.3, -51.7]) {
+      // Top surface flush at y = 0.04 + 0.625 = 0.665 (right beneath y=0.70 hard-light deck — zero wheel clipping!)
       pierEntries.push({
         geo: pierBoxGeo,
-        position: [px, 0.35, 0]
+        position: [px, 0.04, 0]
       });
+      this.colliders.push(
+        { id: `bridge_pier_${px}_n`, x: px, z: -3.35, radius: 0.52 },
+        { id: `bridge_pier_${px}_s`, x: px, z: 3.35, radius: 0.52 }
+      );
     }
 
     const mirrorFrameGeo = new RoundedBoxGeometry(1.56, 1.14, 0.18, 3, 0.05);
@@ -1608,7 +1881,10 @@ export class WorldBuilder {
 
     tentGroup.add(dome, geoWire, airlock);
     this.groups.static.add(tentGroup);
-    this.colliders.push({ id: 'outpost_tent', x: tentX, z: tentZ, radius: 2.6 });
+    this.colliders.push(
+      { id: 'outpost_tent', x: tentX, z: tentZ, radius: 2.72, maxY: ty + 3.0, occluder: true },
+      { id: 'outpost_airlock', x: tentX + 2.15, z: tentZ + 0.8, radius: 0.92, maxY: ty + 1.8 }
+    );
 
     // Basalt Geothermal Vent Chimneys + Hexagonal Basalt Column Pillars in North Region
     const basaltGeo = createBasaltClusterGeometry(515);
@@ -1775,6 +2051,7 @@ export class WorldBuilder {
       lg.add(screen);
       this.groups.dynamic.add(lg);
       this.logVisuals.set(log.id, { group: lg, screen });
+      this.colliders.push({ id: `log_${log.id}`, x: log.position.x, z: log.position.z, radius: 0.46 });
     }
 
     const mergedStands = mergeTransformedGeometries(standEntries);
@@ -2180,6 +2457,41 @@ export class WorldBuilder {
         sonarEchoRing,
         _settledScale: false
       });
+
+      // Solid physical colliders for ALL 47 resource nodes (surface, subsurface rim & sky-mesa)
+      // so Milo stops cleanly beside outcrops/fissures to harvest/drill instead of clipping inside them!
+      const minY = plat ? plat.topY - 0.5 : undefined;
+      if (node.subsurface) {
+        this.colliders.push({
+          id: `res_sub_${node.id}`,
+          x: node.x,
+          z: node.z,
+          radius: 0.62,
+          minY,
+          maxY: ny + 0.85
+        });
+      } else {
+        const maxY = ny + 1.55;
+        this.colliders.push(
+          {
+            id: `res_base_${node.id}`,
+            x: node.x,
+            z: node.z,
+            radius: 0.48,
+            minY,
+            maxY
+          },
+          {
+            id: `res_full_${node.id}`,
+            x: node.x,
+            z: node.z,
+            radius: 0.84,
+            minY,
+            maxY,
+            activeFn: () => this.state.isNodeAvailable(node.id)
+          }
+        );
+      }
     });
 
     // Flush all 47 node host-rock beds + 141 pebbles into ONE static draw call!
@@ -2354,11 +2666,11 @@ export class WorldBuilder {
       if (event === 'sonar_pulsed') {
         this.triggerSonarWave(detail.x, detail.z);
       } else if (
-        event === 'node_harvested' ||
-        event === 'node_respawned' ||
-        event === 'repair_applied' ||
+        event === 'resource_gathered' ||
+        event === 'node_regrown' ||
+        event === 'repair_installed' ||
         event === 'level_completed' ||
-        event === 'reset'
+        event === 'state_reset'
       ) {
         this._shadowDirty = true;
       }

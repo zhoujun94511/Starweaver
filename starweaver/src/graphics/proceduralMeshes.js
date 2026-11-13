@@ -23,7 +23,8 @@ export function createStratifiedMesaGeometry(
   topRadius = 7,
   bottomRadius = 13,
   height = 22,
-  seed = 101
+  seed = 101,
+  tightSilhouette = false
 ) {
   const radialSegs = 56;
   const heightSegs = 28;
@@ -74,22 +75,28 @@ export function createStratifiedMesaGeometry(
       const tScaled = hNorm * terraceSteps + gully * 0.45;
       const shelfStep = (Math.sin(tScaled * Math.PI * 2) * 0.048) * (1 - Math.pow(1 - hNorm, 2.5));
 
+      const lobeAmp = tightSilhouette ? 0.28 : 1.0;
       const lobe =
         1.0 +
-        0.24 * Math.cos(theta * 2 + asymAngle) +
-        0.15 * Math.sin(theta * 3 - asymAngle * 0.7) +
-        0.08 * Math.cos(theta * 5 + asymAngle * 1.3);
+        lobeAmp * (
+          0.24 * Math.cos(theta * 2 + asymAngle) +
+          0.15 * Math.sin(theta * 3 - asymAngle * 0.7) +
+          0.08 * Math.cos(theta * 5 + asymAngle * 1.3)
+        );
 
-      // Wide sweeping talus sand-apron blending smoothly into desert floor!
-      const talusFlare = Math.pow(1 - clamp(hNorm / 0.34, 0, 1), 2.2) * 0.38;
+      // Wide sweeping talus sand-apron on horizon cliffs; tighter tapered skirt on climbable sky-spires!
+      const talusFlare =
+        Math.pow(1 - clamp(hNorm / 0.34, 0, 1), 2.2) * (tightSilhouette ? 0.10 : 0.38);
 
+      const gullyAmp = tightSilhouette ? 0.14 : 0.34;
+      const baseScale = tightSilhouette ? 0.92 : 0.8;
       const dispFactor =
-        lobe * (0.8 + gully * 0.34 + (fineCrag - 0.5) * 0.08 + shelfStep + talusFlare);
+        lobe * (baseScale + gully * gullyAmp + (fineCrag - 0.5) * 0.06 + shelfStep + talusFlare);
 
       x *= dispFactor;
       z *= dispFactor;
 
-      if (hNorm > 0.95) {
+      if (!tightSilhouette && hNorm > 0.95) {
         const capNoise = fbm2D(nx * 1.2, nz * 1.2, 2);
         y += (capNoise - 0.45) * height * 0.06;
       }
@@ -516,14 +523,14 @@ export function createAlienAgaveGeometry() {
   // Central glowing desert flower bud
   const bud = new THREE.OctahedronGeometry(0.22, 1);
   bud.translate(0, 0.38, 0);
-  const nb = bud.toNonIndexed();
+  const nb = bud.index ? bud.toNonIndexed() : bud;
   const bp = nb.attributes.position;
   for (let i = 0; i < bp.count; i++) {
     posList.push(bp.getX(i), bp.getY(i), bp.getZ(i));
     colList.push(cCore.r, cCore.g, cCore.b);
   }
   bud.dispose();
-  nb.dispose();
+  if (nb !== bud) nb.dispose();
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(posList, 3));

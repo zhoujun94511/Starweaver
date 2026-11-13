@@ -264,20 +264,27 @@ export class GuidanceSystem {
       if (subStep) return subStep;
     }
 
-    // If any input is still smelting in queue, wait beside station
+    // If any input is still smelting or fabricating in queue, wait beside the exact station producing it!
     for (const inp of recipe.inputs) {
       if (this.state.getItemCount(inp.id) < inp.count) {
-        const waitStation = this._pickNearestStation(rx, rz, 'furnace');
+        const inpRecipe = RECIPES.find((r) => r.output.id === inp.id);
+        const waitStationType = inpRecipe ? inpRecipe.station : 'furnace';
+        const waitStation = this._pickNearestStation(rx, rz, waitStationType);
+        const isFab = waitStationType === 'fabricator';
         return this._pack(
           rx,
           rz,
           waitStation.x,
           waitStation.z,
-          '#ffbe4d',
+          isFab ? '#5ce8ff' : '#ffbe4d',
           'wait_queue',
           zh
-            ? `等待【${this.state.text(MATERIALS[inp.id].name)}】熔炼出炉...`
-            : `Waiting for ${this.state.text(MATERIALS[inp.id].name)} to finish smelting...`
+            ? isFab
+              ? `等待【${this.state.text(MATERIALS[inp.id].name)}】精密组装完成...`
+              : `等待【${this.state.text(MATERIALS[inp.id].name)}】熔炼出炉...`
+            : isFab
+              ? `Waiting for ${this.state.text(MATERIALS[inp.id].name)} to finish fabricating...`
+              : `Waiting for ${this.state.text(MATERIALS[inp.id].name)} to finish smelting...`
         );
       }
     }

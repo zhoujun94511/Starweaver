@@ -29,6 +29,7 @@ export const UI_STRINGS = {
     btnConfirmYes: 'Yes, Reset',
     btnCancel: 'Cancel',
     qualityLabel: 'Graphics Quality',
+    qualityUltra: 'Ultra (Cinematic)',
     qualityHigh: 'High',
     qualityMedium: 'Medium',
     qualityLow: 'Low (Performance)',
@@ -124,7 +125,16 @@ export const UI_STRINGS = {
     prefWorldLabels: '3D Station Signboards',
     prefIdleTips: 'Idle Helper Tips',
     btnCleanViewOn: '👁 Clean View',
-    btnCleanViewOff: '👁 Full Hints'
+    btnCleanViewOff: '👁 Full Hints',
+    envTimeLabel: 'Planetary Day-Night Cycle',
+    timeCycle: 'Auto Cycle',
+    timeDay: 'Daylight',
+    timeNight: 'Starry Night',
+    envWeatherLabel: 'Kharis-4 Atmospheric Weather',
+    weatherDynamic: 'Dynamic',
+    weatherClear: 'Clear',
+    weatherOvercast: 'Overcast',
+    weatherSandstorm: 'Sandstorm'
   },
   zh: {
     gameTitle: '星织号',
@@ -153,6 +163,7 @@ export const UI_STRINGS = {
     btnConfirmYes: '确认重置',
     btnCancel: '取消',
     qualityLabel: '画面品质',
+    qualityUltra: '极高 (电影级)',
     qualityHigh: '高画质',
     qualityMedium: '中画质',
     qualityLow: '流畅模式 (低开销)',
@@ -248,7 +259,16 @@ export const UI_STRINGS = {
     prefWorldLabels: '3D 建筑悬浮招牌',
     prefIdleTips: '闲置温馨提示气泡',
     btnCleanViewOn: '👁 纯净视野',
-    btnCleanViewOff: '👁 完整提示'
+    btnCleanViewOff: '👁 完整提示',
+    envTimeLabel: '星球昼夜状态（星河与邻近巨行星）',
+    timeCycle: '自动昼夜交替',
+    timeDay: '锁定白昼',
+    timeNight: '锁定星夜',
+    envWeatherLabel: '卡里斯荒漠天气演化',
+    weatherDynamic: '动态天气',
+    weatherClear: '晴朗',
+    weatherOvercast: '沙霾阴天',
+    weatherSandstorm: '荒漠沙尘暴'
   }
 };
 

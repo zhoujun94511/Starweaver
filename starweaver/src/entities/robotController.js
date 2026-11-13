@@ -6,15 +6,20 @@ import { clamp, damp, getTerrainHeight } from '../utils/math.js';
 import { mergeTransformedGeometries } from '../utils/geometryBatcher.js';
 
 export class RobotController {
-  constructor(scene, state, sound, particles = null) {
+  constructor(scene, state, sound, particles = null, pbrLibrary = null) {
     this.scene = scene;
     this.state = state;
     this.sound = sound;
     this.particles = particles;
+    this.pbrLibrary = pbrLibrary;
 
     this.group = new THREE.Group();
     this.group.name = 'robot';
+    this.group.rotation.order = 'YXZ';
     this.scene.add(this.group);
+
+    this._slopePitch = 0;
+    this._slopeRoll = 0;
 
     // Spawn just in front-right of the crashed spacecraft in Crash Basin
     this.position = new THREE.Vector3(4.8, 0, 5.8);
@@ -73,25 +78,37 @@ export class RobotController {
     this.bodyPivot = new THREE.Group();
     this.group.add(this.bodyPivot);
 
-    // Glossy ceramic clearcoat shell + anodized tangerine trim + matte titanium chassis
+    const lib = this.pbrLibrary;
+    // Glossy ceramic clearcoat shell + weathered anodized tangerine trim + milled titanium chassis
     const ceramicShellMat = new THREE.MeshPhysicalMaterial({
-      color: '#f6f9fc',
-      roughness: 0.18,
-      metalness: 0.08,
+      map: lib ? lib.hull_white.map : null,
+      normalMap: lib ? lib.hull_white.normalMap : null,
+      normalScale: new THREE.Vector2(0.28, 0.28),
+      color: '#f7faff',
+      roughness: 0.16,
+      metalness: 0.1,
       clearcoat: 1.0,
-      clearcoatRoughness: 0.08
+      clearcoatRoughness: 0.06
     });
     const accentMat = new THREE.MeshPhysicalMaterial({
-      color: '#ff8f36',
-      roughness: 0.26,
+      map: lib ? lib.painted_orange.map : null,
+      normalMap: lib ? lib.painted_orange.normalMap : null,
+      normalScale: new THREE.Vector2(0.38, 0.38),
+      color: lib ? '#ffffff' : '#ff8f36',
+      roughness: 0.24,
       metalness: 0.35,
-      clearcoat: 0.65,
-      clearcoatRoughness: 0.18
+      clearcoat: 0.68,
+      clearcoatRoughness: 0.15
     });
     const chassisMat = new THREE.MeshStandardMaterial({
-      color: '#283242',
-      roughness: 0.52,
-      metalness: 0.62
+      map: lib ? lib.titanium_dark.map : null,
+      aoMap: lib ? lib.titanium_dark.ormMap : null,
+      roughnessMap: lib ? lib.titanium_dark.ormMap : null,
+      metalnessMap: lib ? lib.titanium_dark.ormMap : null,
+      normalMap: lib ? lib.titanium_dark.normalMap : null,
+      color: lib ? '#ffffff' : '#283242',
+      roughness: lib ? 1.0 : 0.52,
+      metalness: lib ? 1.0 : 0.62
     });
     const tireMat = new THREE.MeshStandardMaterial({
       color: '#1e2430',
@@ -242,6 +259,60 @@ export class RobotController {
     this.antennaBulb.position.y = 0.32;
     this.antennaPivot.add(antBase, stem, this.antennaBulb);
     this.headGroup.add(this.antennaPivot);
+
+    // Automatic Nocturnal / Sandstorm Headlamp (zero shadow-map cost + soft volumetric beam cone!)
+    this.headlampLight = new THREE.SpotLight('#fff0c8', 0.0, 17.5, Math.PI * 0.27, 0.58, 1.35);
+    this.headlampLight.position.set(0, 0.08, 0.44);
+    this.headlampTarget = new THREE.Object3D();
+    this.headlampTarget.position.set(0, -0.82, 6.8);
+    this.headGroup.add(this.headlampLight, this.headlampTarget);
+    this.headlampLight.target = this.headlampTarget;
+
+    const coneGeo = new THREE.ConeGeometry(1.65, 5.6, 20, 1, true);
+    coneGeo.translate(0, -2.8, 0);
+    coneGeo.rotateX(-Math.PI * 0.5);
+    this.headlampConeMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uStrength: { value: 0.0 },
+        uColor: { value: new THREE.Color('#ffe8b0') }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        varying vec3 vNormalV;
+        varying vec3 vViewPos;
+        void main() {
+          vUv = uv;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vViewPos = -mv.xyz;
+          vNormalV = normalize(normalMatrix * normal);
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: `
+        uniform float uStrength;
+        uniform vec3 uColor;
+        varying vec2 vUv;
+        varying vec3 vNormalV;
+        varying vec3 vViewPos;
+        void main() {
+          // vUv.y = 1 at apex (visor), 0 at far base
+          float axial = smoothstep(0.0, 0.85, vUv.y) * smoothstep(1.0, 0.82, vUv.y);
+          float edgeSoft = pow(abs(dot(normalize(vNormalV), normalize(vViewPos))), 1.6);
+          float a = axial * edgeSoft * uStrength * 0.24;
+          if (a < 0.003) discard;
+          gl_FragColor = vec4(uColor, a);
+        }
+      `
+    });
+    this.headlampCone = new THREE.Mesh(coneGeo, this.headlampConeMat);
+    this.headlampCone.position.set(0, 0.04, 0.46);
+    this.headlampCone.rotation.x = 0.13;
+    this.headlampCone.visible = false;
+    this.headGroup.add(this.headlampCone);
 
     // 4. Articulated Arms with Shoulder Joints & Two-Prong Claws
     this.leftArm = this._createArmWithClaw(ceramicShellMat, chassisMat, accentMat);
@@ -618,6 +689,9 @@ export class RobotController {
   }
 
   clearIntroSleepPose() {
+    this._slopePitch = 0;
+    this._slopeRoll = 0;
+    this.group.rotation.x = 0;
     this.group.rotation.z = 0;
     this.bodyPivot.rotation.x = 0;
     this.headGroup.rotation.x = 0;
@@ -628,9 +702,65 @@ export class RobotController {
     this.syncPositionToMesh();
   }
 
-  syncPositionToMesh(supportY = this.position.y) {
+  setNightHeadlamp(strength = 0) {
+    const s = clamp(strength, 0, 1);
+    if (this.headlampLight) {
+      this.headlampLight.visible = s > 0.01 && this.group.visible;
+      this.headlampLight.intensity = s * 3.8;
+    }
+    if (this.headlampCone) {
+      this.headlampCone.visible = s > 0.03 && this.group.visible;
+      this.headlampConeMat.uniforms.uStrength.value = s;
+    }
+  }
+
+  syncPositionToMesh(supportY = this.position.y, dt = 0) {
     this.group.position.copy(this.position);
     this.group.rotation.y = this.yaw;
+
+    // Align chassis pitch & roll smoothly to desert dune slope so neither wheel clips into sand or floats!
+    if (dt > 0) {
+      let targetPitch = 0;
+      let targetRoll = 0;
+      const onPlat = getElevatedPlatformAt(this.position.x, this.position.z, -0.05);
+      const isFlatDeck = Boolean(onPlat && this.position.y >= onPlat.topY - 0.35);
+
+      if (this.isGrounded && !isFlatDeck) {
+        const bridgeOpen = this.state.isBridgeExtended();
+        const sinY = Math.sin(this.yaw);
+        const cosY = Math.cos(this.yaw);
+        const sampleDist = 0.46;
+
+        const hFront = getTerrainHeight(
+          this.position.x + sinY * sampleDist,
+          this.position.z + cosY * sampleDist,
+          bridgeOpen
+        );
+        const hBack = getTerrainHeight(
+          this.position.x - sinY * sampleDist,
+          this.position.z - cosY * sampleDist,
+          bridgeOpen
+        );
+        const hRight = getTerrainHeight(
+          this.position.x + cosY * sampleDist,
+          this.position.z - sinY * sampleDist,
+          bridgeOpen
+        );
+        const hLeft = getTerrainHeight(
+          this.position.x - cosY * sampleDist,
+          this.position.z + sinY * sampleDist,
+          bridgeOpen
+        );
+
+        targetPitch = clamp(-Math.atan2(hFront - hBack, sampleDist * 2), -0.26, 0.26);
+        targetRoll = clamp(Math.atan2(hLeft - hRight, sampleDist * 2), -0.24, 0.24);
+      }
+
+      this._slopePitch = damp(this._slopePitch, targetPitch, 12, dt);
+      this._slopeRoll = damp(this._slopeRoll, targetRoll, 12, dt);
+      this.group.rotation.x = this._slopePitch;
+      this.group.rotation.z = this._slopeRoll;
+    }
 
     if (this.groundShadowMesh) {
       this.groundShadowMesh.visible = this.group.visible;
@@ -734,78 +864,98 @@ export class RobotController {
         this.speed = damp(this.speed, 0, 14, dt);
       }
 
-      // Always enforce world bounds, chasm safety & cylinder depenetration even when hovering/descending vertically with zero WASD!
-      if (moveMag > 0.01 || !this.isGrounded) {
-        const r = Math.hypot(nextX, nextZ);
-        if (r > 84) {
-          nextX *= 84 / r;
-          nextZ *= 84 / r;
-        }
-
+      // 3-Pass Iterative Gauss-Seidel Depenetration when moving/airborne, plus 1-pass idle safety check
+      // so standing grounded after landing or dynamic barrier state changes never leaves residual overlap!
+      const depenPasses = moveMag > 0.01 || !this.isGrounded ? 3 : 1;
+      if (depenPasses > 0) {
         const bridgeOpen = this.state.isBridgeExtended();
-        if (nextX < -38.0 && nextX > -52.0) {
-          if (!bridgeOpen) {
-            if (this.position.x >= -38.0) nextX = -38.0;
-            else nextX = -52.0;
-            if (this._gateBumpCooldown <= 0) {
-              this._gateBumpCooldown = 2.4;
-              this.sound.playBarrierBump();
-              if (this.onChasmBump) this.onChasmBump();
-            }
-          } else if (this.isGrounded && Math.abs(nextZ) > 2.75 && this.position.y < 1.5) {
-            if (this.position.x >= -38.0) nextX = -38.0;
-            else if (this.position.x <= -52.0) nextX = -52.0;
-            else nextZ = clamp(nextZ, -2.7, 2.7);
-          }
-        }
+        const allowBumpFeedback = moveMag > 0.01 || !this.isGrounded;
 
-        // Collide against Elevated Sky-Mesa cliff walls whenever Milo is below the plateau rim!
-        for (const plat of ELEVATED_PLATFORMS) {
-          if (this.position.y < plat.topY - 0.62) {
-            const dx = nextX - plat.x;
-            const dz = nextZ - plat.z;
-            const minDist = this.radius + plat.radius;
+        for (let iter = 0; iter < depenPasses; iter++) {
+          const r = Math.hypot(nextX, nextZ);
+          if (r > 84) {
+            nextX *= 84 / r;
+            nextZ *= 84 / r;
+          }
+
+          if (nextX < -38.0 && nextX > -52.0) {
+            if (!bridgeOpen) {
+              if (this.position.x >= -38.0) nextX = -38.0;
+              else nextX = -52.0;
+              if (allowBumpFeedback && iter === 0 && this._gateBumpCooldown <= 0) {
+                this._gateBumpCooldown = 2.4;
+                this.sound.playBarrierBump();
+                if (this.onChasmBump) this.onChasmBump();
+              }
+            } else if (this.isGrounded && Math.abs(nextZ) > 2.75 && this.position.y < 1.5) {
+              if (this.position.x >= -38.0) nextX = -38.0;
+              else if (this.position.x <= -52.0) nextX = -52.0;
+              else nextZ = clamp(nextZ, -2.7, 2.7);
+            }
+          }
+
+          // Tapered frustum collision against Elevated Sky-Mesa / Basalt Pillars matching exact rock skirt!
+          for (const plat of ELEVATED_PLATFORMS) {
+            if (this.position.y < plat.topY - 0.55) {
+              const baseY = getTerrainHeight(plat.x, plat.z, false);
+              const hFrac = clamp(
+                (this.position.y - baseY) / Math.max(1.5, plat.topY - baseY),
+                0,
+                1
+              );
+              const bottomMult = plat.style === 'basalt' ? 1.24 : 1.26;
+              const effPlatRadius = plat.radius * (bottomMult + (1.02 - bottomMult) * hFrac);
+
+              const dx = nextX - plat.x;
+              const dz = nextZ - plat.z;
+              const minDist = this.radius + effPlatRadius;
+              const dSq = dx * dx + dz * dz;
+              if (dSq < minDist * minDist) {
+                const d = Math.sqrt(dSq) || 0.001;
+                const push = minDist - d;
+                nextX += (dx / d) * push;
+                nextZ += (dz / d) * push;
+              }
+            }
+          }
+
+          for (const col of colliders) {
+            if (col.activeFn && !col.activeFn()) continue;
+            const isFullHeightBarrier =
+              col.id && (col.id.startsWith('gate_') || col.id.startsWith('canyon_cliff_'));
+            if (!isFullHeightBarrier && col.minY !== undefined && this.position.y < col.minY) {
+              continue;
+            }
+            if (!isFullHeightBarrier && col.maxY !== undefined && this.position.y > col.maxY) {
+              continue;
+            }
+            if (
+              !isFullHeightBarrier &&
+              col.minY === undefined &&
+              col.maxY === undefined &&
+              !col.id?.startsWith('ship_') &&
+              this.position.y > getTerrainHeight(col.x, col.z, false) + 3.2
+            ) {
+              continue;
+            }
+
+            const dx = nextX - col.x;
+            const dz = nextZ - col.z;
+            const minDist = this.radius + col.radius;
             const dSq = dx * dx + dz * dz;
             if (dSq < minDist * minDist) {
               const d = Math.sqrt(dSq) || 0.001;
               const push = minDist - d;
               nextX += (dx / d) * push;
               nextZ += (dz / d) * push;
-            }
-          }
-        }
 
-        for (const col of colliders) {
-          if (col.activeFn && !col.activeFn()) continue;
-          const isFullHeightBarrier =
-            col.id && (col.id.startsWith('gate_') || col.id.startsWith('canyon_cliff_'));
-          if (!isFullHeightBarrier && col.minY !== undefined && this.position.y < col.minY) {
-            continue;
-          }
-          if (
-            !isFullHeightBarrier &&
-            col.minY === undefined &&
-            !col.id?.startsWith('ship_') &&
-            this.position.y > getTerrainHeight(col.x, col.z, false) + 3.2
-          ) {
-            continue;
-          }
-
-          const dx = nextX - col.x;
-          const dz = nextZ - col.z;
-          const minDist = this.radius + col.radius;
-          const dSq = dx * dx + dz * dz;
-          if (dSq < minDist * minDist) {
-            const d = Math.sqrt(dSq) || 0.001;
-            const push = minDist - d;
-            nextX += (dx / d) * push;
-            nextZ += (dz / d) * push;
-
-            if (col.id && col.id.startsWith('gate_') && this._gateBumpCooldown <= 0) {
-              this._gateBumpCooldown = 2.4;
-              this.sound.playBarrierBump();
-              if (this.onGateBump) {
-                this.onGateBump(col.id.replace('gate_', ''));
+              if (allowBumpFeedback && iter === 0 && col.id && col.id.startsWith('gate_') && this._gateBumpCooldown <= 0) {
+                this._gateBumpCooldown = 2.4;
+                this.sound.playBarrierBump();
+                if (this.onGateBump) {
+                  const baseRegion = col.id.replace(/^gate_/, '').replace(/_p[12]$/, '');
+                  this.onGateBump(baseRegion);
+                }
               }
             }
           }
@@ -916,7 +1066,7 @@ export class RobotController {
       }
     }
 
-    this.syncPositionToMesh(Math.max(-1, supportY));
+    this.syncPositionToMesh(Math.max(-1, supportY), controlsLocked ? 0 : dt);
 
     // Update holographic guide arrow pointing cleanly toward active waypoint
     if (
