@@ -1,12 +1,7 @@
 // Dedicated Multi-Touch Virtual Joystick & Contextual Action Pad for Mobile / Tablet (pointer: coarse).
 // Remains 100% hidden on desktop mouse/keyboard setups; activates automatically on touch-capable devices.
 
-function el(tag, className = '', text = '') {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text) node.textContent = text;
-  return node;
-}
+import { el } from './domHelpers.js';
 
 export class TouchControls {
   constructor(root, state, sound, callbacks) {
@@ -27,6 +22,7 @@ export class TouchControls {
     this._lastStateSig = '';
 
     this.touchActive = this._detectInitialTouchCapability();
+    this.compactViewport = this._detectCompactViewport();
     this._visibleAllowed = false;
 
     this._buildDom();
@@ -48,12 +44,27 @@ export class TouchControls {
     return false;
   }
 
+  _detectCompactViewport() {
+    if (typeof window === 'undefined') return false;
+    const w = window.innerWidth || 1440;
+    const h = window.innerHeight || 900;
+    return w <= 1180 || h <= 620;
+  }
+
+  isControlPadActive() {
+    const manualPref = this.state?.settings?.onScreenControls;
+    if (manualPref === true) return true;
+    if (manualPref === false && !this.touchActive) return false;
+    return Boolean(this.touchActive || this.compactViewport);
+  }
+
   _syncBodyClass() {
     if (typeof document !== 'undefined') {
+      const active = this.isControlPadActive();
       const prev = document.body.classList.contains('touch-active');
-      document.body.classList.toggle('touch-active', this.touchActive);
-      if (prev !== this.touchActive && this.callbacks.onTouchModeChange) {
-        this.callbacks.onTouchModeChange(this.touchActive);
+      document.body.classList.toggle('touch-active', active);
+      if (prev !== active && this.callbacks.onTouchModeChange) {
+        this.callbacks.onTouchModeChange(active);
       }
     }
   }
@@ -74,24 +85,25 @@ export class TouchControls {
     this.subRow = el('div', 'touch-sub-row');
     this.btnInspect = el('button', 'touch-pad-btn sub hidden');
     this.btnInspectIcon = el('span', 'touch-btn-icon', '🔍');
-    this.btnInspectLbl = el('span', 'touch-btn-lbl', '详情');
+    const initialZh = this.state.lang === 'zh';
+    this.btnInspectLbl = el('span', 'touch-btn-lbl', initialZh ? '详情' : 'INFO');
     this.btnInspect.append(this.btnInspectIcon, this.btnInspectLbl);
 
     this.btnSonar = el('button', 'touch-pad-btn sonar hidden');
     this.btnSonarIcon = el('span', 'touch-btn-icon', '📡');
-    this.btnSonarLbl = el('span', 'touch-btn-lbl', '声呐');
+    this.btnSonarLbl = el('span', 'touch-btn-lbl', initialZh ? '声呐' : 'SONAR');
     this.btnSonar.append(this.btnSonarIcon, this.btnSonarLbl);
     this.subRow.append(this.btnInspect, this.btnSonar);
 
     this.mainRow = el('div', 'touch-main-row');
     this.btnJet = el('button', 'touch-pad-btn jet hidden');
     this.btnJetIcon = el('span', 'touch-btn-icon', '🚀');
-    this.btnJetLbl = el('span', 'touch-btn-lbl', '喷气');
+    this.btnJetLbl = el('span', 'touch-btn-lbl', initialZh ? '喷气' : 'FLY');
     this.btnJet.append(this.btnJetIcon, this.btnJetLbl);
 
     this.btnAct = el('button', 'touch-pad-btn primary-act idle');
     this.btnActIcon = el('span', 'touch-btn-icon', '✋');
-    this.btnActLbl = el('span', 'touch-btn-lbl', '交互');
+    this.btnActLbl = el('span', 'touch-btn-lbl', initialZh ? '交互' : 'ACT');
     this.btnAct.append(this.btnActIcon, this.btnActLbl);
 
     this.mainRow.append(this.btnJet, this.btnAct);
@@ -120,11 +132,24 @@ export class TouchControls {
       if (mq.addEventListener) {
         mq.addEventListener('change', (ev) => {
           this.touchActive = ev.matches;
+          this.compactViewport = this._detectCompactViewport();
           this._syncBodyClass();
           this._refreshLayerVisibility();
         });
       }
     }
+
+    // Reveal on-screen joystick & action pad automatically whenever resized into medium/small viewports!
+    window.addEventListener('resize', () => {
+      const nextCompact = this._detectCompactViewport();
+      const nextTouch = this._detectInitialTouchCapability() || this.touchActive;
+      if (nextCompact !== this.compactViewport || nextTouch !== this.touchActive) {
+        this.compactViewport = nextCompact;
+        this.touchActive = nextTouch;
+        this._syncBodyClass();
+        this._refreshLayerVisibility();
+      }
+    });
 
     // --- Virtual Joystick Multi-Touch Safe Handlers ---
     const endJoystick = (e) => {
@@ -144,6 +169,7 @@ export class TouchControls {
       this.moveVec.x = 0;
       this.moveVec.z = 0;
       this.joyBase.classList.remove('active');
+      this.joyBase.style.transform = 'translate3d(0px, 0px, 0px)';
       this.joyKnob.style.transform = 'translate3d(0px, 0px, 0px)';
     };
 
@@ -155,8 +181,18 @@ export class TouchControls {
 
       this._joyPointerId = e.pointerId;
       const rect = this.joyBase.getBoundingClientRect();
-      this._joyOrigin.x = rect.left + rect.width * 0.5;
-      this._joyOrigin.y = rect.top + rect.height * 0.5;
+      const baseCx = rect.left + rect.width * 0.5;
+      const baseCy = rect.top + rect.height * 0.5;
+      // Floating thumb-anchor within 26px of pad center so initial touch never jumps or feels off-axis!
+      const rawOffX = e.clientX - baseCx;
+      const rawOffY = e.clientY - baseCy;
+      const offDist = Math.hypot(rawOffX, rawOffY);
+      const maxFloat = 26;
+      const floatX = offDist > maxFloat ? (rawOffX / offDist) * maxFloat : rawOffX;
+      const floatY = offDist > maxFloat ? (rawOffY / offDist) * maxFloat : rawOffY;
+      this._joyOrigin.x = baseCx + floatX;
+      this._joyOrigin.y = baseCy + floatY;
+      this.joyBase.style.transform = `translate3d(${floatX.toFixed(1)}px, ${floatY.toFixed(1)}px, 0px)`;
       this.joyBase.classList.add('active');
 
       try {
@@ -269,25 +305,49 @@ export class TouchControls {
       clampedY = (dy / dist) * maxR;
     }
 
-    this.joyKnob.style.transform = `translate3d(${clampedX.toFixed(1)}px, ${clampedY.toFixed(1)}px, 0px)`;
+    if (this.joyKnob) {
+      this.joyKnob.style.transform = `translate3d(${clampedX.toFixed(1)}px, ${clampedY.toFixed(1)}px, 0px)`;
+    }
 
+    // Continuous radial deadzone remap: smoothly ramps from 0.0 -> 1.0 with slight analog curve!
+    const deadZone = 0.085;
     const norm = Math.min(1, dist / maxR);
-    if (norm < 0.11) {
+    if (norm <= deadZone || dist < 1e-4) {
       this.moveVec.x = 0;
       this.moveVec.z = 0;
     } else {
-      this.moveVec.x = clampedX / maxR;
-      this.moveVec.z = clampedY / maxR;
+      const remapped = (norm - deadZone) / (1 - deadZone);
+      const curved = remapped * (0.78 + 0.22 * remapped);
+      this.moveVec.x = (dx / dist) * curved;
+      this.moveVec.z = (dy / dist) * curved;
     }
   }
 
   resetInputState() {
+    // Release browser pointer capture before clearing IDs. Otherwise a hidden
+    // tab can keep routing stale move/up events to the old joystick or jetpack
+    // element after visibility is restored.
+    const release = (el, pointerId) => {
+      if (pointerId === null || !el || typeof el.hasPointerCapture !== 'function') return;
+      try {
+        if (el.hasPointerCapture(pointerId) && typeof el.releasePointerCapture === 'function') {
+          el.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // Capture may already have been canceled by the browser.
+      }
+    };
+    release(this.joyZone, this._joyPointerId);
+    release(this.btnJet, this._jetPointerId);
     this._joyPointerId = null;
     this._jetPointerId = null;
     this.moveVec.x = 0;
     this.moveVec.z = 0;
     this.flyHeld = false;
-    if (this.joyBase) this.joyBase.classList.remove('active');
+    if (this.joyBase) {
+      this.joyBase.classList.remove('active');
+      this.joyBase.style.transform = 'translate3d(0px, 0px, 0px)';
+    }
     if (this.joyKnob) this.joyKnob.style.transform = 'translate3d(0px, 0px, 0px)';
     if (this.btnJet) this.btnJet.classList.remove('held');
   }
@@ -301,27 +361,53 @@ export class TouchControls {
   }
 
   _refreshLayerVisibility() {
-    const show = this.touchActive && this._visibleAllowed;
+    const show = this.isControlPadActive() && this._visibleAllowed;
     this.layer.classList.toggle('hidden', !show);
   }
 
-  updateContext(nearestTarget) {
-    if (!this.touchActive || !this._visibleAllowed) return;
+  refreshVisibility() {
+    this.compactViewport = this._detectCompactViewport();
+    this._syncBodyClass();
+    this._refreshLayerVisibility();
+  }
+
+  updateContext(nearestTarget, { passiveRoam = false, homeworldRoam = false } = {}) {
+    if (!this.isControlPadActive() || !this._visibleAllowed) return;
 
     const zh = this.state.lang === 'zh';
-    const hasDrill = this.state.hasEquipment('drill');
+    const hasDrill = !passiveRoam && !homeworldRoam && this.state.hasEquipment('drill');
     const hasJetpack = this.state.hasEquipment('jetpack');
     const canInspect = Boolean(
-      nearestTarget && nearestTarget.inspectTitle && nearestTarget.kind !== 'log'
+      !passiveRoam && nearestTarget && nearestTarget.inspectTitle && nearestTarget.kind !== 'log'
     );
 
-    let actIcon = '✋';
-    let actLabel = zh ? '交互' : 'ACT';
+    let actIcon = homeworldRoam ? '💬' : '✋';
+    let actLabel = homeworldRoam ? (zh ? '巡检' : 'ACT') : (zh ? '交互' : 'ACT');
     let actReady = false;
 
     if (nearestTarget) {
       actReady = true;
       switch (nearestTarget.kind) {
+        case 'homeworld_activity':
+          actIcon = '◎';
+          actLabel = zh ? '巡检' : 'CHECK';
+          break;
+        case 'homeworld_crew_chat':
+          actIcon = '💬';
+          actLabel = zh ? '交谈' : 'TALK';
+          break;
+        case 'sky_plaque':
+          actIcon = nearestTarget.id === 'sky_arch' ? '⏱' : '🏛️';
+          actLabel = nearestTarget.id === 'sky_arch'
+            ? (zh ? '竞速' : 'TRIAL')
+            : (zh ? '铭牌' : 'PLAQUE');
+          break;
+        case 'weather_beacon':
+          actIcon = nearestTarget.done ? '⚡' : '📡';
+          actLabel = nearestTarget.done
+            ? (zh ? '折跃' : 'WARP')
+            : (zh ? '并网' : 'LINK');
+          break;
         case 'resource':
           if (!nearestTarget.available) {
             actIcon = '⏳';
@@ -358,7 +444,9 @@ export class TouchControls {
       }
     }
 
-    const sig = `${zh ? 1 : 0}|${hasDrill ? 1 : 0}|${hasJetpack ? 1 : 0}|${canInspect ? 1 : 0}|${actReady ? 1 : 0}|${actIcon}|${actLabel}`;
+    // Only hide primary button in explicit headless passiveRoam tests; keep action button visible in gameplay & Homeworld!
+    const hideAction = Boolean(passiveRoam);
+    const sig = `${zh ? 1 : 0}|${hideAction ? 1 : 0}|${hasDrill ? 1 : 0}|${hasJetpack ? 1 : 0}|${canInspect ? 1 : 0}|${actReady ? 1 : 0}|${actIcon}|${actLabel}`;
     if (this._lastStateSig === sig) return;
     this._lastStateSig = sig;
 
@@ -371,6 +459,7 @@ export class TouchControls {
     this.btnInspect.classList.toggle('hidden', !canInspect);
     this.btnInspectLbl.textContent = zh ? '详情' : 'INFO';
 
+    this.btnAct.classList.toggle('hidden', hideAction);
     this.btnActIcon.textContent = actIcon;
     this.btnActLbl.textContent = actLabel;
     this.btnAct.classList.toggle('ready', actReady);

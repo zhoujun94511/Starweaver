@@ -1,234 +1,43 @@
-import { CREW_LOGS, MATERIALS, RECIPES } from '../data/gameData.js';
+import { HOMEWORLD_LANDMARKS, HOMEWORLD_CALIBRATION, HOMEWORLD_COPY } from '../data/homeworldActivities.js';
+import { el, clearChildren } from './domHelpers.js';
+import { createCollapsibleDrawer, createJetpackPill, clearHudRegion } from './hudPrimitives.js';
+import { createMaterialIconCanvas } from './materialIcons.js';
+import { formatSolarFluxBadge, renderQueueOnly, renderWorkbenchBody } from './workbenchModal.js';
+import { renderPauseModal } from './pauseSettingsModal.js';
+import {
+  CREW_LOGS,
+  EQUIPMENT_DEFS,
+  LEVELS,
+  MATERIALS,
+  RECIPES,
+  REGIONS,
+  STATION_TYPES,
+  locateRegionId
+} from '../data/gameData.js';
 
-// Safe DOM helper — exclusively uses createElement & textContent (never innerHTML).
-function el(tag, className = '', text = '') {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== '' && text !== null && text !== undefined) {
-    node.textContent = String(text);
+const HOMEWORLD_HUD_COPY = {
+  navigation: { zh: '家园巡检引导', en: 'Homeworld watch guidance' },
+  guideArrow: { zh: '3D 巡检方向标', en: '3D watch direction marker' },
+  compass: { zh: '下一处巡检地点', en: 'Next watch destination' },
+  environment: { zh: '翡翠河谷', en: 'Emerald Valley' },
+  environmentNote: {
+    zh: '晴朗日光下的生态聚落。沿步道探索观测坡、生态苗圃与河岸能源站，巡检进度会自动保存。',
+    en: 'A sunlit ecological settlement. Follow the paths to the observatory, nursery and riverside power station. Watch progress is saved automatically.'
+  },
+  resume: { zh: '继续家园漫游', en: 'Resume homeworld stroll' },
+  unstuck: { zh: '返回停机坪（脱困）', en: 'Return to the landing pad (unstuck)' },
+  controls: {
+    zh: 'WASD / 方向键 移动 · 拖动 转视角 · 滚轮 缩放 · E 交谈/设备 · F 详情 · C 巡检手账 · Space 喷气 · Esc 设置',
+    en: 'WASD / arrows Move · Drag Orbit · Wheel Zoom · E Talk / device · F Details · C Watch journal · Space Jetpack · Esc Settings'
+  },
+  touchControls: {
+    zh: '左摇杆移动 · 拖动画面转视角 · 双指缩放 · 靠近角色或设备交谈/操作 · 巡检手账查看下一站',
+    en: 'Joystick Move · Drag Orbit · Pinch Zoom · Approach crew or devices to interact · Watch journal Next stop'
   }
-  return node;
-}
-
-function clearChildren(node) {
-  while (node.firstChild) {
-    node.removeChild(node.firstChild);
-  }
-}
-
-const MASTER_ICON_CACHE = new Map();
-
-/**
- * Draws a crisp procedural 2D icon for any material/component onto a <canvas> element.
- * Caches master vector renders per (mat.id, small) and fast-blits clones in O(1)!
- */
-function createMaterialIconCanvas(mat, small = false) {
-  const px = small ? 52 : 76;
-  const cacheKey = `${mat.id}:${small ? 's' : 'l'}`;
-
-  let master = MASTER_ICON_CACHE.get(cacheKey);
-  if (!master) {
-    master = document.createElement('canvas');
-    master.width = px;
-    master.height = px;
-    _drawMasterIcon(master, mat, small, px);
-    MASTER_ICON_CACHE.set(cacheKey, master);
-  }
-
-  const clone = document.createElement('canvas');
-  clone.width = px;
-  clone.height = px;
-  clone.className = small ? 'mat-icon-canvas small' : 'mat-icon-canvas';
-  clone.getContext('2d').drawImage(master, 0, 0);
-  return clone;
-}
-
-function _drawMasterIcon(canvas, mat, small, px) {
-  const ctx = canvas.getContext('2d');
-  const c = px * 0.5;
-  const r = px * 0.34;
-  const col = mat.color || '#8ecae6';
-
-  // Soft radial backlight glow
-  const glow = ctx.createRadialGradient(c, c, r * 0.1, c, c, r * 1.25);
-  glow.addColorStop(0, `${col}55`);
-  glow.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, px, px);
-
-  ctx.save();
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-
-  if (mat.category === 'ship_module') {
-    // Octagonal radiant ship core + outer energy ring
-    ctx.strokeStyle = col;
-    ctx.lineWidth = small ? 2.2 : 3;
-    ctx.beginPath();
-    ctx.arc(c, c, r * 1.05, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2 - Math.PI / 8;
-      const vx = c + Math.cos(a) * r * 0.74;
-      const vy = c + Math.sin(a) * r * 0.74;
-      if (i === 0) ctx.moveTo(vx, vy);
-      else ctx.lineTo(vx, vy);
-    }
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(c, c, r * 0.28, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (mat.category === 'equipment') {
-    if (mat.equipmentSlot === 'drill') {
-      // Conical spiral auger drill icon
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.62, c - r * 0.68);
-      ctx.lineTo(c + r * 0.62, c - r * 0.68);
-      ctx.lineTo(c, c + r * 0.95);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = '#ffffffcc';
-      ctx.lineWidth = small ? 2 : 3;
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.45, c - r * 0.32);
-      ctx.lineTo(c + r * 0.35, c - r * 0.12);
-      ctx.moveTo(c - r * 0.28, c + r * 0.12);
-      ctx.lineTo(c + r * 0.2, c + r * 0.32);
-      ctx.stroke();
-    } else {
-      // Swept twin thruster wings icon
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.moveTo(c, c - r * 0.45);
-      ctx.lineTo(c + r * 0.95, c - r * 0.15);
-      ctx.lineTo(c + r * 0.68, c + r * 0.55);
-      ctx.lineTo(c, c + r * 0.2);
-      ctx.lineTo(c - r * 0.68, c + r * 0.55);
-      ctx.lineTo(c - r * 0.95, c - r * 0.15);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(c, c - r * 0.1, r * 0.25, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  } else if (mat.category === 'subcomponent') {
-    // Hexagonal precision module + circuit pins
-    ctx.fillStyle = col;
-    ctx.strokeStyle = '#ffffffaa';
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2 - Math.PI / 2;
-      const vx = c + Math.cos(a) * r * 0.86;
-      const vy = c + Math.sin(a) * r * 0.86;
-      if (i === 0) ctx.moveTo(vx, vy);
-      else ctx.lineTo(vx, vy);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = '#0d1b2a';
-    ctx.beginPath();
-    ctx.arc(c, c, r * 0.36, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(c, c, r * 0.16, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (mat.category === 'refined') {
-    if (mat.id.includes('lens') || mat.id.includes('wire')) {
-      // Optical lens / silver coil torus
-      ctx.strokeStyle = col;
-      ctx.lineWidth = small ? 4.5 : 6.5;
-      ctx.beginPath();
-      ctx.arc(c, c, r * 0.72, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = '#ffffffcc';
-      ctx.beginPath();
-      ctx.arc(c - r * 0.22, c - r * 0.22, r * 0.2, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (mat.id.includes('canister') || mat.id.includes('rod') || mat.id.includes('core')) {
-      // Cylindrical fuel cell / filter cartridge
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.roundRect(c - r * 0.52, c - r * 0.82, r * 1.04, r * 1.64, r * 0.35);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.75)';
-      ctx.fillRect(c - r * 0.24, c - r * 0.52, r * 0.2, r * 1.04);
-    } else {
-      // Beveled metallic ingot / structural plate
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.65, c - r * 0.48);
-      ctx.lineTo(c + r * 0.65, c - r * 0.48);
-      ctx.lineTo(c + r * 0.92, c + r * 0.48);
-      ctx.lineTo(c - r * 0.92, c + r * 0.48);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.52, c - r * 0.36);
-      ctx.lineTo(c + r * 0.52, c - r * 0.36);
-      ctx.lineTo(c + r * 0.68, c - r * 0.02);
-      ctx.lineTo(c - r * 0.68, c - r * 0.02);
-      ctx.closePath();
-      ctx.fill();
-    }
-  } else {
-    // Raw materials: Crystal shards vs Ore chunk
-    const isCrystal =
-      mat.id.includes('crystal') || mat.id === 'lumen_core' || mat.id === 'coolant_gel';
-    ctx.fillStyle = col;
-    if (isCrystal) {
-      // Twin crystal spires
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.1, c - r * 0.95);
-      ctx.lineTo(c + r * 0.42, c - r * 0.1);
-      ctx.lineTo(c + r * 0.18, c + r * 0.85);
-      ctx.lineTo(c - r * 0.46, c + r * 0.65);
-      ctx.lineTo(c - r * 0.55, c - r * 0.25);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = 'rgba(255,255,255,0.65)';
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.1, c - r * 0.9);
-      ctx.lineTo(c + r * 0.12, c - r * 0.1);
-      ctx.lineTo(c - r * 0.28, c + r * 0.5);
-      ctx.closePath();
-      ctx.fill();
-    } else {
-      // Craggy ore nugget
-      ctx.beginPath();
-      ctx.moveTo(c - r * 0.35, c - r * 0.78);
-      ctx.lineTo(c + r * 0.55, c - r * 0.62);
-      ctx.lineTo(c + r * 0.85, c + r * 0.15);
-      ctx.lineTo(c + r * 0.32, c + r * 0.78);
-      ctx.lineTo(c - r * 0.68, c + r * 0.62);
-      ctx.lineTo(c - r * 0.82, c - r * 0.12);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.beginPath();
-      ctx.arc(c - r * 0.2, c - r * 0.25, r * 0.24, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  ctx.restore();
-  return canvas;
-}
+};
+const DESERT_FEEDBACK_EVENTS = new Set([
+  'craft_completed', 'equipment_unlocked', 'drone_delivered', 'side_task_completed', 'level_completed'
+]);
 
 export class HudController {
   constructor(root, state, sound, actions) {
@@ -243,6 +52,9 @@ export class HudController {
     this.stationFilter = 'furnace'; // 'all' | 'furnace' | 'fabricator'
     this.stationInteractive = false;
     this.confirmingReset = false;
+    this.inHomeworldRoamMode = false;
+    this._worldPlane = 'desert';
+    this._worldRegionId = null;
     this.toastTimer = 0;
 
     const autoCollapse = this._shouldAutoCollapseDrawers();
@@ -326,35 +138,44 @@ export class HudController {
       this.rightMiniBar.classList.toggle('hidden', !this.rightCollapsed);
       this.rightDrawerBody.classList.toggle('hidden', this.rightCollapsed);
     }
+    if (this.hwLeftTab && this.hwLeftBody) {
+      this.hwLeftTab.classList.toggle('hidden', !this.leftCollapsed);
+      this.hwLeftBody.classList.toggle('hidden', this.leftCollapsed);
+    }
+    if (this.hwBagTab && this.hwBagBody) {
+      this.hwBagTab.classList.toggle('hidden', !this.bagCollapsed);
+      this.hwBagBody.classList.toggle('hidden', this.bagCollapsed);
+    }
   }
 
   _buildDomSkeleton() {
     clearChildren(this.root);
 
-    // 1. Top-Left: Collapsible Slide-Away Mission & Side-Tasks Drawer
-    this.topLeft = el('div', 'hud-top-left');
-
-    this.leftDrawerTab = el('button', 'drawer-pill-tab left-pill hidden');
-    this.leftTabLabelEl = el('span', 'pill-tab-text');
-    const leftTabMiniTrack = el('span', 'pill-mini-track');
-    this.leftTabMiniFill = el('span', 'pill-mini-fill');
-    leftTabMiniTrack.appendChild(this.leftTabMiniFill);
-    this.leftDrawerTab.append(this.leftTabLabelEl, leftTabMiniTrack);
-    this.leftDrawerTab.addEventListener('click', () => {
-      this.sound.playUiClick();
-      this.setLeftCollapsed(false, true);
+    // 1. Top-Left: Collapsible Slide-Away Mission & Side-Tasks Drawer (shared primitive)
+    const desertMissionDrawer = createCollapsibleDrawer({
+      wrapClass: 'hud-top-left',
+      tabClass: 'drawer-pill-tab left-pill hidden',
+      bodyClass: 'left-drawer-body',
+      cardClass: 'hud-card mission-card',
+      titleClass: 'level-header',
+      withMiniProgress: true,
+      onExpand: () => {
+        this.sound.playUiClick();
+        this.setLeftCollapsed(false, true);
+      },
+      onCollapse: () => {
+        this.sound.playUiClick();
+        this.setLeftCollapsed(true, true);
+      }
     });
-
-    this.leftDrawerBody = el('div', 'left-drawer-body');
-    this.missionCard = el('div', 'hud-card mission-card');
-    const missionHeadRow = el('div', 'mission-head-row');
-    this.levelTitleEl = el('div', 'level-header');
-    this.missionFoldBtn = el('button', 'drawer-fold-chip');
-    this.missionFoldBtn.addEventListener('click', () => {
-      this.sound.playUiClick();
-      this.setLeftCollapsed(true, true);
-    });
-    missionHeadRow.append(this.levelTitleEl, this.missionFoldBtn);
+    this.topLeft = desertMissionDrawer.wrap;
+    this.leftDrawerTab = desertMissionDrawer.tab;
+    this.leftTabLabelEl = desertMissionDrawer.tabLabel;
+    this.leftTabMiniFill = desertMissionDrawer.miniFill;
+    this.leftDrawerBody = desertMissionDrawer.body;
+    this.missionCard = desertMissionDrawer.card;
+    this.levelTitleEl = desertMissionDrawer.titleEl;
+    this.missionFoldBtn = desertMissionDrawer.foldBtn;
 
     this.missionSummaryEl = el('div', 'mission-summary');
     this.levelProgressBar = el('div', 'progress-bar-track');
@@ -362,7 +183,6 @@ export class HudController {
     this.levelProgressBar.appendChild(this.levelProgressFill);
     this.stepsContainer = el('div', 'step-list');
     this.missionCard.append(
-      missionHeadRow,
       this.missionSummaryEl,
       this.levelProgressBar,
       this.stepsContainer
@@ -373,8 +193,7 @@ export class HudController {
     this.sideListEl = el('div', 'side-list');
     this.sideCard.append(this.sideHeaderEl, this.sideListEl);
 
-    this.leftDrawerBody.append(this.missionCard, this.sideCard);
-    this.topLeft.append(this.leftDrawerTab, this.leftDrawerBody);
+    this.leftDrawerBody.append(this.sideCard);
 
     // 1.5 Top-Center: Smart Next-Step Guidance Compass Pill (with quick hide × button!)
     this.topCenter = el('div', 'hud-top-center');
@@ -382,7 +201,7 @@ export class HudController {
     this.compassTextEl = el('span', 'compass-text');
     this.compassDistEl = el('span', 'compass-dist');
     this.compassHideBtn = el('button', 'compass-close-btn', '×');
-    this.compassHideBtn.title = 'Hide Next-Step Banner';
+    this.compassHideBtn.title = this.state.ui('compassHideTitle');
     this.compassHideBtn.addEventListener('click', () => {
       this.sound.playUiClick();
       this.state.setHudPref('showCompass', false);
@@ -406,6 +225,7 @@ export class HudController {
         this.setLeftCollapsed(true, true);
         this.setBagCollapsed(true, true);
         this.setRightCollapsed(true, true);
+        this.setHomeworldActionsOpen?.(false);
       } else if (!this._shouldAutoCollapseDrawers()) {
         // Restore expanded drawers on wide desktop screens when toggling back to Full Hints!
         this.setLeftCollapsed(false, true);
@@ -461,14 +281,13 @@ export class HudController {
       this.sound.playUiClick();
       this.setRightCollapsed(false, true);
     });
-    this.miniJetWrap = el('div', 'mini-jet-pill hidden');
-    const mjIcon = el('span', '', '🚀');
-    const mjTrack = el('span', 'mini-jet-track');
-    this.miniJetFillEl = el('span', 'mini-jet-fill');
-    this.miniJetFillEl.style.width = '100%';
-    mjTrack.appendChild(this.miniJetFillEl);
-    this.miniJetPctEl = el('span', 'mini-jet-pct', '100%');
-    this.miniJetWrap.append(mjIcon, mjTrack, this.miniJetPctEl);
+    const desertJetPill = createJetpackPill({
+      wrapClass: 'mini-jet-pill hidden',
+      pctClass: 'mini-jet-pct'
+    });
+    this.miniJetWrap = desertJetPill.wrap;
+    this.miniJetFillEl = desertJetPill.fillEl;
+    this.miniJetPctEl = desertJetPill.pctEl;
     this.rightMiniBar.append(this.miniJetWrap, this.rightExpandBtn);
 
     // Expanded Right Status Body
@@ -487,7 +306,9 @@ export class HudController {
     this.shipBarFill = el('div', 'progress-bar-fill');
     this.shipBarTrack.appendChild(this.shipBarFill);
     this.shipPillsEl = el('div', 'ship-pills');
-    this.shipCard.append(shipHeadRow, this.shipBarTrack, this.shipPillsEl);
+    this.shipHomeworldWrap = el('div');
+    this.shipHomeworldWrap.style.marginTop = '8px';
+    this.shipCard.append(shipHeadRow, this.shipBarTrack, this.shipPillsEl, this.shipHomeworldWrap);
 
     this.gearCard = el('div', 'hud-card gear-status-card hidden');
     this.gearBadgesRow = el('div', 'gear-badges-row');
@@ -506,32 +327,39 @@ export class HudController {
     this.rightDrawerBody.append(this.shipCard, this.gearCard);
     this.topRight.append(this.toolbarRow, this.rightMiniBar, this.rightDrawerBody);
 
-    // 3. Bottom-Left: Collapsible Cargo Drawer
-    this.bottomLeft = el('div', 'hud-bottom-left-wrap');
-    this.bagDrawerTab = el('button', 'drawer-pill-tab bag-pill hidden');
-    this.bagDrawerTab.addEventListener('click', () => {
-      this.sound.playUiClick();
-      this.setBagCollapsed(false, true);
+    // 3. Bottom-Left: Collapsible Cargo Drawer (shared primitive)
+    const desertBagDrawer = createCollapsibleDrawer({
+      wrapClass: 'hud-bottom-left-wrap',
+      tabClass: 'drawer-pill-tab bag-pill hidden',
+      bodyClass: 'hud-card hud-bottom-left-card',
+      titleClass: 'section-label',
+      onExpand: () => {
+        this.sound.playUiClick();
+        this.setBagCollapsed(false, true);
+      },
+      onCollapse: () => {
+        this.sound.playUiClick();
+        this.setBagCollapsed(true, true);
+      }
     });
-
-    this.bagCardBody = el('div', 'hud-card hud-bottom-left-card');
-    const invHeadRow = el('div', 'mission-head-row');
-    this.invHeaderEl = el('div', 'section-label');
+    this.bottomLeft = desertBagDrawer.wrap;
+    this.bagDrawerTab = desertBagDrawer.tab;
+    this.bagCardBody = desertBagDrawer.body;
+    this.invHeaderEl = desertBagDrawer.titleEl;
     this.invHeaderEl.style.marginBottom = '0';
-    this.bagFoldBtn = el('button', 'drawer-fold-chip');
-    this.bagFoldBtn.addEventListener('click', () => {
-      this.sound.playUiClick();
-      this.setBagCollapsed(true, true);
-    });
-    invHeadRow.append(this.invHeaderEl, this.bagFoldBtn);
+    this.bagFoldBtn = desertBagDrawer.foldBtn;
     this.invGridEl = el('div', 'inv-grid');
-    this.bagCardBody.append(invHeadRow, this.invGridEl);
-    this.bottomLeft.append(this.bagDrawerTab, this.bagCardBody);
+    this.bagCardBody.appendChild(this.invGridEl);
 
     this._applyDrawerVisibility();
 
-    // 4. Bottom-Center: Toast + Idle Hint + Nearby Interaction Prompt + Control Guide Footer
+    // 4. Bottom-Center: Aerial/Resonance Status Pill + Toast + Idle Hint + Nearby Interaction Prompt + Control Guide Footer
     this.bottomCenter = el('div', 'hud-bottom-center');
+    this.aerialStatusPill = el('div', 'toast-banner hidden');
+    this.aerialStatusPill.style.borderColor = '#5ce8ff';
+    this.aerialStatusPill.style.fontSize = '12px';
+    this.aerialStatusPill.style.padding = '5px 12px';
+    this._lastAerialStatusText = '';
     this.toastEl = el('div', 'toast-banner hidden');
     this.hintBannerEl = el('div', 'hud-card hint-banner hidden');
     this.hintTextEl = el('span');
@@ -547,28 +375,175 @@ export class HudController {
     this.promptSubText = el('div', 'inspect-subprompt');
     this.promptBox.append(this.promptMainText, this.promptSubText);
 
-    this.bottomCenter.append(this.toastEl, this.hintBannerEl, this.promptBox);
+    this.bottomCenter.append(this.aerialStatusPill, this.toastEl, this.hintBannerEl, this.promptBox);
     this.controlsFooter = el('div', 'controls-footer');
 
     // 5. Diegetic Right-Side Workbench Console & Portable Blueprint Pad (No full-screen blur!)
     this.workbenchDrawer = el('div', 'workbench-drawer hidden');
 
-    // 6. Intro Cutscene Cinema Letterbox & Subtitles
+    // 6. Intro & Launch Cutscene Cinema Letterbox & Subtitles
     this.cinemaOverlay = el('div', 'cinema-overlay hidden');
     const cTop = el('div', 'cinema-bar-top');
     this.cinemaSkipBtn = el('button', 'cinema-skip-btn');
     this.cinemaSkipBtn.addEventListener('click', () => {
-      if (this.actions.onSkipIntro) this.actions.onSkipIntro();
+      if (this._cinemaKind === 'launch' && this.actions.onSkipLaunch) {
+        this.actions.onSkipLaunch();
+      } else if (this.actions.onSkipIntro) {
+        this.actions.onSkipIntro();
+      }
     });
     cTop.appendChild(this.cinemaSkipBtn);
 
     const cBot = el('div', 'cinema-bar-bottom');
     this.cinemaSubtitleEl = el('div', 'cinema-subtitle');
     this.cinemaDotsEl = el('div', 'cinema-dots');
-    this.cinemaDotNodes = [el('span', 'cinema-dot'), el('span', 'cinema-dot'), el('span', 'cinema-dot')];
+    this.cinemaDotNodes = [
+      el('span', 'cinema-dot'),
+      el('span', 'cinema-dot'),
+      el('span', 'cinema-dot'),
+      el('span', 'cinema-dot')
+    ];
     this.cinemaDotsEl.append(...this.cinemaDotNodes);
     cBot.append(this.cinemaSubtitleEl, this.cinemaDotsEl);
     this.cinemaOverlay.append(cTop, cBot);
+
+    // 6.5 Homeworld Meadow Free-Stroll Top Floating Pill!
+    this.homeworldBar = el('div', 'homeworld-roam-bar hidden');
+    this.homeworldBarTitle = el('button', 'homeworld-roam-title');
+    this.homeworldBarTitle.type = 'button';
+    this.homeworldBarTitle.setAttribute('aria-expanded', 'false');
+    this.setHomeworldActionsOpen = (open) => {
+      const next = Boolean(open);
+      this.homeworldBar?.classList.toggle('menu-open', next);
+      this.homeworldBarTitle?.setAttribute('aria-expanded', String(next));
+      this.homeworldActionsDock?.classList.toggle('menu-open', next);
+    };
+    this.homeworldBarTitle.addEventListener('click', () => {
+      this.sound.playUiClick();
+      const expanded = !this.homeworldBar.classList.contains('menu-open');
+      this.setHomeworldActionsOpen(expanded);
+    });
+    this.homeworldObjective = el('button', 'hw-objective-pill');
+    this.homeworldObjective.type = 'button';
+    this.homeworldObjective.addEventListener('click', () => {
+      this.sound.playUiClick();
+      this.setHomeworldActionsOpen(false);
+      this.actions.onHomeworldJournal?.();
+    });
+    this.btnHwSummary = el('button', 'hud-btn primary');
+    this.btnHwSummary.addEventListener('click', () => {
+      this.sound.playModalOpen();
+      this.setHomeworldActionsOpen(false);
+      this.openEndingModal();
+    });
+    this.btnHwDesert = el('button', 'hud-btn');
+    this.btnHwDesert.addEventListener('click', () => {
+      this.sound.playUiClick();
+      this.setHomeworldActionsOpen(false);
+      if (this.actions.onFreeRoam) this.actions.onFreeRoam();
+    });
+    this.btnHwReplay = el('button', 'hud-btn');
+    this.btnHwReplay.addEventListener('click', () => {
+      this.sound.playUiClick();
+      this.setHomeworldActionsOpen(false);
+      if (this.actions.onReplayLaunch) this.actions.onReplayLaunch();
+    });
+    // Keep one settings action and its original listener in both worlds.
+    this.btnHwPause = this.btnPause;
+    const hwJetPill = createJetpackPill({
+      wrapClass: 'hw-jet-pill hidden',
+      pctClass: 'hw-jet-pct'
+    });
+    this.hwJetWrap = hwJetPill.wrap;
+    this.hwJetLabel = hwJetPill.labelEl;
+    this.hwJetFillEl = hwJetPill.fillEl;
+    this.hwJetPctEl = hwJetPill.pctEl;
+    this._jetpackPills = [desertJetPill, hwJetPill];
+
+    this.homeworldBar.append(
+      this.homeworldBarTitle,
+      this.homeworldObjective,
+      this.hwJetWrap
+    );
+    this.homeworldActionsDock = el('div', 'homeworld-actions-dock hidden');
+    this.homeworldActionsDock.append(
+      this.btnHwSummary,
+      this.btnHwDesert,
+      this.btnHwReplay
+    );
+    this.homeworldHeader = el('div', 'homeworld-header hidden');
+    this.homeworldHeader.appendChild(this.homeworldBar);
+
+    // 6.6 Homeworld-Dedicated Mission & Ecological Archive Drawers (shared primitive, isolated DOM)
+    const hwMissionDrawer = createCollapsibleDrawer({
+      wrapClass: 'hud-top-left hw-mission-drawer hidden',
+      tabClass: 'drawer-pill-tab left-pill hw-emerald-pill hidden',
+      bodyClass: 'left-drawer-body',
+      cardClass: 'hud-card mission-card hw-emerald-card',
+      titleClass: 'level-header hw-emerald-title',
+      withMiniProgress: true,
+      onExpand: () => {
+        this.sound.playUiClick();
+        this.setLeftCollapsed(false, true);
+      },
+      onCollapse: () => {
+        this.sound.playUiClick();
+        this.setLeftCollapsed(true, true);
+      }
+    });
+    this.hwMissionWrap = hwMissionDrawer.wrap;
+    this.hwLeftTab = hwMissionDrawer.tab;
+    this.hwLeftTabLabel = hwMissionDrawer.tabLabel;
+    this.hwLeftMiniFill = hwMissionDrawer.miniFill;
+    this.hwLeftBody = hwMissionDrawer.body;
+    this.hwTitleEl = hwMissionDrawer.titleEl;
+    this.hwFoldBtn = hwMissionDrawer.foldBtn;
+    const hwMissionCard = hwMissionDrawer.card;
+
+    this.hwSummaryEl = el('div', 'mission-summary');
+    const hwProgTrack = el('div', 'progress-bar-track');
+    this.hwProgFill = el('div', 'progress-bar-fill');
+    hwProgTrack.appendChild(this.hwProgFill);
+    this.hwStepsList = el('div', 'step-list');
+    this.hwViewBtnWrap = el('div');
+    this.hwViewBtnWrap.style.marginTop = '8px';
+    this.hwTelemetrySection = el('div', 'side-tasks-section');
+    this.hwTelemetrySection.style.marginTop = '10px';
+    this.hwTelemetryHeaderEl = el('div', 'section-label');
+    this.hwTelemetryListEl = el('div', 'side-list');
+    this.hwTelemetrySection.append(this.hwTelemetryHeaderEl, this.hwTelemetryListEl);
+    hwMissionCard.append(
+      this.hwSummaryEl,
+      hwProgTrack,
+      this.hwStepsList,
+      this.hwViewBtnWrap,
+      this.hwTelemetrySection
+    );
+
+    const hwArchiveDrawer = createCollapsibleDrawer({
+      wrapClass: 'hud-bottom-left-wrap hw-archive-drawer hidden',
+      tabClass: 'drawer-pill-tab bag-pill hw-emerald-pill hidden',
+      bodyClass: 'hud-card hud-bottom-left-card hw-emerald-card',
+      titleClass: 'section-label',
+      onExpand: () => {
+        this.sound.playUiClick();
+        this.setBagCollapsed(false, true);
+      },
+      onCollapse: () => {
+        this.sound.playUiClick();
+        this.setBagCollapsed(true, true);
+      }
+    });
+    this.hwArchiveWrap = hwArchiveDrawer.wrap;
+    this.hwBagTab = hwArchiveDrawer.tab;
+    this.hwBagBody = hwArchiveDrawer.body;
+    this.hwArchiveTitleEl = hwArchiveDrawer.titleEl;
+    this.hwArchiveTitleEl.style.marginBottom = '0';
+    this.hwBagFoldBtn = hwArchiveDrawer.foldBtn;
+    this.hwArchiveGrid = el('div', 'inv-grid');
+    this.hwBagBody.appendChild(this.hwArchiveGrid);
+
+    this._applyDrawerVisibility();
 
     // 7. Modal Backdrop (Title, Pause, Inspect, Level Complete, Ending)
     this.modalBackdrop = el('div', 'modal-backdrop hidden');
@@ -580,8 +555,12 @@ export class HudController {
       this.topCenter,
       this.topRight,
       this.bottomLeft,
+      this.hwMissionWrap,
+      this.hwArchiveWrap,
       this.bottomCenter,
       this.controlsFooter,
+      this.homeworldHeader,
+      this.homeworldActionsDock,
       this.workbenchDrawer,
       this.cinemaOverlay,
       this.modalBackdrop
@@ -590,6 +569,53 @@ export class HudController {
 
   _bindStateEvents() {
     this.state.on((event, detail) => {
+      // Language changes can happen while a toast, idle hint, compass or cinema
+      // subtitle is still on screen. Those transient strings were produced by
+      // the previous locale and otherwise survive until their own timer/next
+      // world tick, which is the source of intermittent mixed-language HUD.
+      // Invalidate all locale-sensitive caches immediately and let the next
+      // authoritative render repopulate them from GameState.text/ui().
+      if (event === 'settings_changed' && detail && detail.lang) {
+        this.toastTimer = 0;
+        if (this.toastEl) {
+          this.toastEl.className = 'toast-banner hidden';
+          this.toastEl.textContent = '';
+        }
+        this._lastCompassSig = '';
+        this._lastPromptSig = '';
+        this._lastHintSig = '';
+        this._lastQueueSig = '';
+        this._lastIntroSig = '';
+        this._homeworldObjectiveSig = '';
+        this.homeworldObjective.textContent = this.state.text(HOMEWORLD_COPY.journal);
+        if (this.activeModal === 'homeworld_journal' && this._homeworldActivity) {
+          this.openHomeworldJournal(this._homeworldActivity);
+        } else if (this.activeModal === 'homeworld_calibration' && this._homeworldCalibrationAction) {
+          this.openHomeworldCalibration(this._homeworldCalibrationAction);
+        }
+        // A subtitle is passed in as a resolved string by the cutscene driver,
+        // so it cannot be translated safely here. Hide it for this frame; the
+        // cutscene's next act will provide the new locale string.
+        if (this.cinemaOverlay && !this.cinemaOverlay.classList.contains('hidden')) {
+          this.cinemaOverlay.classList.add('hidden');
+        }
+      }
+      if (
+        event === 'world_plane_changed' ||
+        event === 'homeworld_survey_changed' ||
+        event === 'mechanism_updated' ||
+        event === 'log_read' ||
+        event === 'side_task_completed' ||
+        event === 'game_launched'
+      ) {
+        this._lastCompassSig = '';
+        this._lastPromptSig = '';
+        this._homeworldObjectiveSig = '';
+      }
+      if (this.inHomeworldRoamMode && DESERT_FEEDBACK_EVENTS.has(event)) {
+        this.renderAll();
+        return;
+      }
       if (event === 'craft_completed') {
         const mat = MATERIALS[detail.outputId];
         this.showToast(`+${detail.count} ${this.state.text(mat.name)}`, 'good');
@@ -597,9 +623,21 @@ export class HudController {
       }
       if (event === 'equipment_unlocked') {
         this.sound.playRepairInstall();
-        const toastKey =
-          detail.slot === 'drill' ? 'equipDrillToast' : 'equipJetpackToast';
+        const eqDef = EQUIPMENT_DEFS[detail.slot];
+        const toastKey = eqDef ? eqDef.toastKey : 'equipJetpackToast';
         this.showToast(this.state.ui(toastKey), 'celebrate');
+      }
+      if (event === 'drone_delivered') {
+        const mat = MATERIALS[detail.materialId];
+        if (mat && this.activeModal === null) {
+          this.showToast(
+            this.state.ui('droneDeliverToast', {
+              count: detail.count,
+              name: this.state.text(mat.name)
+            }),
+            'good'
+          );
+        }
       }
       if (event === 'side_task_completed') {
         this.sound.playFacilityActivate();
@@ -638,6 +676,14 @@ export class HudController {
     this.bottomLeft.classList[method]('hidden');
     this.bottomCenter.classList[method]('hidden');
     this.controlsFooter.classList[method]('hidden');
+    if (this.inHomeworldRoamMode) {
+      this.topLeft.classList.add('hidden');
+      this.topRight.classList.add('hidden');
+      this.bottomLeft.classList.add('hidden');
+    } else {
+      if (this.hwMissionWrap) this.hwMissionWrap.classList.add('hidden');
+      if (this.hwArchiveWrap) this.hwArchiveWrap.classList.add('hidden');
+    }
     if (visible) {
       this._lastCompassSig = '';
       this._lastPromptSig = '';
@@ -646,7 +692,7 @@ export class HudController {
     }
   }
 
-  setIntroOverlay(visible, actIndex = 0, subtitleText = '') {
+  setIntroOverlay(visible, actIndex = 0, subtitleText = '', totalActs = 3, kind = 'intro') {
     if (!visible) {
       if (this._lastIntroSig !== 'hidden') {
         this._lastIntroSig = 'hidden';
@@ -654,16 +700,158 @@ export class HudController {
       }
       return;
     }
-    const sig = `${actIndex}|${subtitleText}`;
+    this._cinemaKind = kind;
+    const sig = `${kind}|${actIndex}|${totalActs}|${subtitleText}`;
     if (this._lastIntroSig === sig) return;
     this._lastIntroSig = sig;
 
     this.cinemaOverlay.classList.remove('hidden');
-    this.cinemaSkipBtn.textContent = this.state.ui('introSkipBtn');
+    this.cinemaSkipBtn.textContent = this.state.ui(
+      kind === 'launch' ? 'launchSkipBtn' : 'introSkipBtn'
+    );
     this.cinemaSubtitleEl.textContent = subtitleText;
     this.cinemaDotNodes.forEach((dot, idx) => {
-      dot.className = idx === actIndex ? 'cinema-dot active' : 'cinema-dot';
+      if (idx >= totalActs) {
+        dot.className = 'cinema-dot hidden';
+      } else {
+        dot.className = idx === actIndex ? 'cinema-dot active' : 'cinema-dot';
+      }
     });
+  }
+
+  setHomeworldRoamVisible(visible) {
+    const changed = this.inHomeworldRoamMode !== Boolean(visible);
+    this.inHomeworldRoamMode = Boolean(visible);
+    if (!this.homeworldBar) return;
+    this.homeworldBar.classList.toggle('hidden', !visible);
+    this.homeworldHeader.classList.toggle('hidden', !visible);
+    if (this.homeworldActionsDock) this.homeworldActionsDock.classList.toggle('hidden', !visible);
+    if (this.hwMissionWrap) this.hwMissionWrap.classList.toggle('hidden', !visible);
+    if (this.hwArchiveWrap) this.hwArchiveWrap.classList.toggle('hidden', !visible);
+    if (this.controlsFooter) this.controlsFooter.classList.toggle('hidden', !visible);
+    // Moving the original toolbar preserves every global control, listener and
+    // locale update. Hiding desert progress must not hide the settings with it.
+    if (visible) {
+      this.homeworldHeader.appendChild(this.toolbarRow);
+      this.toolbarRow.classList.add('homeworld-utility-row');
+      // The toolbar has already moved into the homeworld header. Hide the desert
+      // mission, ship and cargo drawers themselves so their old text cannot sit
+      // underneath the valley watch.
+      for (const node of [this.topLeft, this.topRight, this.bottomLeft]) {
+        if (node) node.classList.add('hidden');
+      }
+    } else {
+      this.topRight.insertBefore(this.toolbarRow, this.topRight.firstChild);
+      this.toolbarRow.classList.remove('homeworld-utility-row');
+    }
+    this.bottomCenter.classList.toggle('hidden', !visible);
+    if (visible) {
+      this._lastFuelPct = -1;
+      this._lastPromptSig = '';
+      this._homeworldObjectiveSig = '';
+      this.homeworldBar.classList.remove('menu-open');
+      this.homeworldActionsDock?.classList.remove('menu-open');
+      this.homeworldBarTitle.setAttribute('aria-expanded', 'false');
+      this._syncHomeworldBarTexts();
+    }
+    if (changed) {
+      // Resolved strings from the old world cannot survive into a different
+      // interaction context while waiting for the next guidance frame.
+      this.toastTimer = 0;
+      for (const node of [this.toastEl, this.hintBannerEl, this.promptBox, this.topCenter]) node.classList.add('hidden');
+      for (const node of [this.toastEl, this.hintTextEl, this.promptMainText, this.promptSubText,
+        this.compassTextEl, this.compassDistEl]) node.textContent = '';
+      this._lastCompassSig = this._lastPromptSig = this._lastHintSig = this._homeworldObjectiveSig = '';
+      if (visible) {
+        if (this.activeModal === 'station') this.closeModal();
+        clearHudRegion(
+          ['levelTitleEl', 'missionSummaryEl', 'leftTabLabelEl', 'sideHeaderEl',
+            'shipHeaderEl', 'rightExpandBtn', 'invHeaderEl', 'bagDrawerTab', 'jetpackLabelEl'].map((k) => this[k]),
+          ['stepsContainer', 'sideListEl', 'shipPillsEl', 'shipHomeworldWrap', 'gearBadgesRow', 'invGridEl'].map((k) => this[k])
+        );
+      } else {
+        clearHudRegion(
+          ['hwTitleEl', 'hwSummaryEl', 'hwLeftTabLabel', 'hwArchiveTitleEl', 'hwBagTab', 'hwTelemetryHeaderEl'].map((k) => this[k]),
+          ['hwStepsList', 'hwArchiveGrid', 'hwViewBtnWrap', 'hwTelemetryListEl'].map((k) => this[k])
+        );
+      }
+      if (this.activeModal !== 'title' && this.activeModal !== 'ending') {
+        this.renderAll();
+      }
+    }
+  }
+
+  updateHomeworldObjective(waypoint) {
+    if (waypoint?.worldPlane !== 'homeworld') return;
+    const survey = this.state.homeworldSurvey;
+    const count = HOMEWORLD_LANDMARKS.reduce((total, point) => total + Number(survey.records[point.id]), 0);
+    const beaconProg =
+      typeof this.state.getMechanismProgress === 'function'
+        ? this.state.getMechanismProgress('weather_beacons')
+        : { done: 0, total: 5 };
+    const progress = survey.completed ? (this.state.lang === 'zh' ? '返航纪念章 ✓' : 'Medallion ✓') :
+      `${this.state.lang === 'zh' ? '巡检' : 'Watch'} ${count}/3${count === 3 ? ` · ⚡${survey.calibration}/3` : ''}`;
+    const telemetrySuffix =
+      survey.completed && beaconProg.done > 0 ? ` · 📡${beaconProg.done}/${beaconProg.total}` : '';
+    const text = survey.completed ? `${progress}${telemetrySuffix}` : `${progress} · ${waypoint.label} ${waypoint.distMeters}m`;
+    if (this._homeworldObjectiveSig === text) return;
+    this._homeworldObjectiveSig = text;
+    this.homeworldObjective.textContent = text;
+    this.homeworldObjective.title = `${this.state.text(HOMEWORLD_COPY.journal)}: ${text}`;
+    this.homeworldObjective.setAttribute('aria-label', this.homeworldObjective.title);
+  }
+
+  _syncHomeworldBarTexts() {
+    if (!this.homeworldBar) return;
+    this.homeworldBarTitle.textContent = this.state.ui('homeworldBannerTitle');
+    this.btnHwSummary.textContent = this.state.ui('homeworldShowSummary');
+    this.btnHwDesert.textContent = this.state.ui('homeworldReturnKharis');
+    this.btnHwReplay.textContent = this.state.ui('btnReplayLaunch');
+    this.homeworldObjective.classList.toggle('hidden', this.state.settings.showCompass === false);
+    if (this.btnHwPause) {
+      this.btnHwPause.textContent = this.state.lang === 'zh' ? '⚙ 设置' : '⚙ Menu';
+    }
+    if (this.hwJetWrap) {
+      this.hwJetWrap.classList.toggle('hidden', !this.state.hasEquipment('jetpack'));
+    }
+  }
+
+  noteWorldFocus(plane, x, z) {
+    const nextPlane = plane === 'homeworld' ? 'homeworld' : 'desert';
+    const regionId = nextPlane === 'homeworld' ? null : locateRegionId(x, z);
+    if (this._worldPlane === nextPlane && this._worldRegionId === regionId) return;
+    this._worldPlane = nextPlane;
+    this._worldRegionId = regionId;
+    if (
+      this.inHomeworldRoamMode ||
+      this.activeModal === 'title' ||
+      this.activeModal === 'ending'
+    ) {
+      return;
+    }
+    this.renderAll();
+  }
+
+  _sceneLevelDef() {
+    if (!this._worldRegionId) return null;
+    const level = LEVELS.find((entry) => entry.regionId === this._worldRegionId);
+    if (!level || level.level > (this.state.currentLevel || 1)) return null;
+    return level;
+  }
+
+  _focusLevelNumber() {
+    const regionId = this.activeStationFacility?.region || this._worldRegionId || null;
+    if (regionId) {
+      const level = LEVELS.find((entry) => entry.regionId === regionId);
+      if (level) return Math.min(level.level, this.state.currentLevel || level.level);
+    }
+    return this.state.currentLevel || 1;
+  }
+
+  _regionShortName(regionId) {
+    const region = regionId ? REGIONS[regionId] : null;
+    if (!region) return '';
+    return this.state.text(region.name).split(/[（(]/)[0].trim();
   }
 
   showToast(message, style = 'good') {
@@ -672,7 +860,18 @@ export class HudController {
     this.toastTimer = 3.6;
   }
 
-  updateFrame(dt, nearestTarget, idleHintText, activeWaypoint = null, jetFuelPct = 100) {
+  updateFrame(dt, nearestTarget, idleHintText, activeWaypoint = null, jetFuelPct = 100, aerialStatusText = '') {
+    if (this.inHomeworldRoamMode) {
+      if (
+        nearestTarget?.kind !== 'homeworld_activity' &&
+        nearestTarget?.kind !== 'homeworld_crew_chat' &&
+        nearestTarget?.kind !== 'sky_plaque'
+      ) {
+        nearestTarget = null;
+      }
+      if (activeWaypoint?.worldPlane !== 'homeworld') activeWaypoint = null;
+      idleHintText = null;
+    }
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) {
@@ -686,20 +885,45 @@ export class HudController {
         this._lastFuelPct = clamped;
         this.jetpackFillEl.style.width = `${clamped}%`;
         this.jetpackPctEl.textContent = `${clamped}%`;
-        if (this.miniJetFillEl && this.miniJetPctEl) {
-          this.miniJetFillEl.style.width = `${clamped}%`;
-          this.miniJetPctEl.textContent = `${clamped}%`;
+        if (this._jetpackPills?.length) {
+          for (const pill of this._jetpackPills) pill.update(clamped);
+        } else {
+          if (this.miniJetFillEl && this.miniJetPctEl) {
+            this.miniJetFillEl.style.width = `${clamped}%`;
+            this.miniJetPctEl.textContent = `${clamped}%`;
+          }
+          if (this.hwJetFillEl && this.hwJetPctEl) {
+            this.hwJetFillEl.style.width = `${clamped}%`;
+            this.hwJetPctEl.textContent = `${clamped}%`;
+          }
         }
       }
     }
 
     const blocking = this.isBlockingGameplay();
-    const allowCompass = this.state.settings.showCompass !== false;
+    const nextAerialText = !blocking && aerialStatusText ? aerialStatusText : '';
+    if (this.aerialStatusPill && this._lastAerialStatusText !== nextAerialText) {
+      this._lastAerialStatusText = nextAerialText;
+      if (nextAerialText) {
+        this.aerialStatusPill.textContent = nextAerialText;
+        this.aerialStatusPill.classList.remove('hidden');
+      } else {
+        this.aerialStatusPill.classList.add('hidden');
+      }
+    }
+    // Homeworld navigation occupies the existing objective pill in its header;
+    // the desert's independent top-centre compass would overlap that header.
+    const allowCompass = !this.inHomeworldRoamMode && this.state.settings.showCompass !== false;
     const allowIdleTips = this.state.settings.showIdleTips !== false;
+    const isTouch =
+      typeof document !== 'undefined' &&
+      document.body.classList.contains('touch-active');
 
     if (activeWaypoint && !blocking && allowCompass) {
       const distStr =
-        activeWaypoint.distMeters <= 3 ? '● HERE' : `${activeWaypoint.distMeters}m`;
+        activeWaypoint.distMeters <= 3
+          ? `● ${this.state.ui('waypointHere')}`
+          : `${activeWaypoint.distMeters}m`;
       const cSig = `${activeWaypoint.color}|${activeWaypoint.label}|${distStr}|${this.state.lang}`;
       if (this._lastCompassSig !== cSig) {
         this._lastCompassSig = cSig;
@@ -715,9 +939,6 @@ export class HudController {
     }
 
     if (nearestTarget && !blocking) {
-      const isTouch =
-        typeof document !== 'undefined' &&
-        document.body.classList.contains('touch-active');
       const rawPrompt = isTouch
         ? nearestTarget.prompt.replace(/^\[[A-Za-z]+\]\s*/, '')
         : nearestTarget.prompt;
@@ -741,7 +962,18 @@ export class HudController {
       this.promptBox.classList.add('hidden');
     }
 
-    if (idleHintText && !blocking && allowIdleTips) {
+    // On touch portrait layouts the generic guidance card and the nearby
+    // interaction prompt compete for the same bottom-safe band. The nearby
+    // prompt is actionable, so suppress the idle card while a target is in
+    // range and restore it as soon as the player moves away.
+    const suppressIdleHintForTouchTarget =
+      isTouch && Boolean(nearestTarget);
+    if (
+      idleHintText &&
+      !blocking &&
+      allowIdleTips &&
+      !suppressIdleHintForTouchTarget
+    ) {
       if (this._lastHintSig !== idleHintText) {
         this._lastHintSig = idleHintText;
         this.hintTextEl.textContent = `${this.state.ui('hintPrefix')}${idleHintText}`;
@@ -769,6 +1001,7 @@ export class HudController {
     this.missionFoldBtn.textContent = foldText;
     this.bagFoldBtn.textContent = foldText;
     this.rightFoldBtn.textContent = this.state.lang === 'zh' ? '▴ 收起' : '▴ Hide';
+    this.compassHideBtn.title = this.state.ui('compassHideTitle');
 
     this.btnNavArrow.textContent = stripKey(
       this.state.settings.guideArrow === false
@@ -776,7 +1009,8 @@ export class HudController {
         : this.state.ui('navToggleOn')
     );
     this.btnGuide.textContent = stripKey(
-      this.state.lang === 'zh' ? '📖 蓝图 [C]' : '📖 Blueprints [C]'
+      this.inHomeworldRoamMode ? `📖 ${this.state.text(HOMEWORLD_COPY.journal)} [C]` :
+        this.state.lang === 'zh' ? '📖 蓝图 [C]' : '📖 Blueprints [C]'
     );
     this.btnAudio.textContent = this.state.settings.muted
       ? this.state.ui('audioOff')
@@ -784,25 +1018,43 @@ export class HudController {
     this.btnLang.textContent = this.state.ui('langToggle');
     this.btnPause.textContent =
       this.state.lang === 'zh' ? '⚙ 设置' : '⚙ Menu';
-    this.controlsFooter.textContent = this.state.ui('controlsSummary');
+    this.controlsFooter.textContent = this.inHomeworldRoamMode ?
+      this.state.text(isTouch ? HOMEWORLD_HUD_COPY.touchControls : HOMEWORLD_HUD_COPY.controls) :
+      this.state.ui('controlsSummary');
 
-    // Layer 2: Current-Level Main Repair Objective + Left Collapsed Pill Summary
+    // The postgame watch has its own authoritative progress and interactions.
+    // Do not repopulate hidden desert mission/material panels on settings or
+    // background crafting events after the toolbar has moved to the homeworld.
+    if (this.inHomeworldRoamMode) {
+      this._syncHomeworldBarTexts();
+      this._renderHomeworldDrawers(foldText);
+      this._applyDrawerVisibility();
+      return;
+    }
+
+    // Layer 2: Current-Level Main Repair Objective (or Post-Game Climate Expedition!) + Left Collapsed Pill Summary
     const lvlProg = this.state.getCurrentLevelProgress();
     const pctStr = `${Math.round(lvlProg.fraction * 100)}%`;
     this.levelTitleEl.textContent = lvlProg.title;
     this.missionSummaryEl.textContent = lvlProg.summary;
     this.levelProgressFill.style.width = pctStr;
-    this.leftTabLabelEl.textContent = `${this.state.ui('tabMissionShort', {
-      level: lvlProg.level,
-      done: lvlProg.doneSteps,
-      total: lvlProg.totalSteps
-    })} ▸`;
+    this.leftTabLabelEl.textContent = lvlProg.isPostGame
+      ? `${this.state.lang === 'zh' ? '📡 科考' : '📡 Grid'} (${lvlProg.doneSteps}/${lvlProg.totalSteps}) ▸`
+      : `${this.state.ui('tabMissionShort', {
+          level: lvlProg.level,
+          done: lvlProg.doneSteps,
+          total: lvlProg.totalSteps
+        })} ▸`;
     this.leftTabMiniFill.style.width = pctStr;
 
     clearChildren(this.stepsContainer);
     for (const step of lvlProg.steps) {
-      const row = el('div', `step-row${step.done ? ' done' : ''}`);
-      const nameSpan = el('span', '', `${step.done ? '✓ ' : '○ '}${step.label}`);
+      const here = Boolean(
+        lvlProg.isPostGame && step.regionId && step.regionId === this._worldRegionId && !step.done
+      );
+      const row = el('div', `step-row${step.done ? ' done' : ''}${here ? ' here' : ''}`);
+      const prefix = step.done ? '✓ ' : here ? '▶ ' : '○ ';
+      const nameSpan = el('span', '', `${prefix}${step.label}`);
       const countSpan = el('strong', '', `${step.current}/${step.needed}`);
       row.append(nameSpan, countSpan);
       this.stepsContainer.appendChild(row);
@@ -839,45 +1091,68 @@ export class HudController {
     })} ▾`;
 
     clearChildren(this.shipPillsEl);
-    const shortLabels =
-      this.state.lang === 'zh'
-        ? ['1.电力', '2.通信', '3.维生', '4.导航', '5.推进']
-        : ['1.Power', '2.Comms', '3.LifeSup', '4.Nav', '5.Thrust'];
-    globalProg.systems.forEach((sys, i) => {
+    for (const sys of globalProg.systems) {
       const pill = el(
         'span',
         `ship-pill${sys.repaired ? ' online' : ''}`,
-        `${sys.repaired ? '✓ ' : ''}${shortLabels[i]}`
+        `${sys.repaired ? '✓ ' : ''}${sys.shortLabel}`
       );
       this.shipPillsEl.appendChild(pill);
-    });
+    }
+    if (this.shipHomeworldWrap) {
+      clearChildren(this.shipHomeworldWrap);
+      if (this.state.launchedHome) {
+        const hwProg =
+          typeof this.state.getHomeworldProgress === 'function'
+            ? this.state.getHomeworldProgress()
+            : { doneSteps: 0, totalSteps: 5 };
+        const btnReturnHw = el(
+          'button',
+          'hud-btn primary',
+          this.state.lang === 'zh'
+            ? `🌿 返回翡翠母星 (${hwProg.doneSteps}/${hwProg.totalSteps})`
+            : `🌿 Return to Homeworld (${hwProg.doneSteps}/${hwProg.totalSteps})`
+        );
+        btnReturnHw.style.width = '100%';
+        btnReturnHw.addEventListener('click', () => {
+          this.sound.playUiClick();
+          if (this.actions.onWalkHomeworld) this.actions.onWalkHomeworld();
+        });
+        this.shipHomeworldWrap.appendChild(btnReturnHw);
+      }
+    }
 
-    // Equipped Upgrades & Jetpack Fuel Bar
-    const hasDrill = this.state.hasEquipment('drill');
-    const hasJetpack = this.state.hasEquipment('jetpack');
-    this.miniJetWrap.classList.toggle('hidden', !hasJetpack);
+    // Declaratively render Equipped Upgrades & Jetpack Fuel Bar from EQUIPMENT_DEFS
+    const unlockedGear = Object.values(EQUIPMENT_DEFS).filter((def) =>
+      this.state.hasEquipment(def.slot)
+    );
+    const hasFuelGear = unlockedGear.some((def) => def.showsFuelGauge);
+    this.miniJetWrap.classList.toggle('hidden', !hasFuelGear);
 
-    if (hasDrill || hasJetpack) {
+    if (unlockedGear.length > 0) {
       this.gearCard.classList.remove('hidden');
       clearChildren(this.gearBadgesRow);
-      if (hasDrill) {
-        const dChip = el(
-          'button',
-          'gear-chip drill',
-          stripKey(this.state.ui('gearDrillBadge'))
-        );
-        dChip.addEventListener('click', () => {
-          if (this.actions.onTriggerSonar) this.actions.onTriggerSonar();
-        });
-        this.gearBadgesRow.appendChild(dChip);
+      for (const def of unlockedGear) {
+        if (def.actionId === 'sonar') {
+          const dChip = el(
+            'button',
+            'gear-chip drill',
+            stripKey(this.state.ui(def.badgeKey))
+          );
+          dChip.addEventListener('click', () => {
+            if (this.actions.onTriggerSonar) this.actions.onTriggerSonar();
+          });
+          this.gearBadgesRow.appendChild(dChip);
+        } else {
+          const gChip = el(
+            'span',
+            'gear-chip',
+            stripKey(this.state.ui(def.badgeKey))
+          );
+          this.gearBadgesRow.appendChild(gChip);
+        }
       }
-      if (hasJetpack) {
-        const jChip = el(
-          'span',
-          'gear-chip',
-          stripKey(this.state.ui('gearJetpackBadge'))
-        );
-        this.gearBadgesRow.appendChild(jChip);
+      if (hasFuelGear) {
         this.jetpackLabelEl.textContent = this.state.ui('jetpackGaugeLabel');
         this.jetpackGaugeWrap.classList.remove('hidden');
       } else {
@@ -887,8 +1162,26 @@ export class HudController {
       this.gearCard.classList.add('hidden');
     }
 
-    // Persistent Inventory + Collapsed Bag Pill Summary
-    this.invHeaderEl.textContent = this.state.ui('inventoryTitle');
+    // Cargo follows the region under the player's feet. A material counts as local
+    // only when this region is its primary source, or it belongs to this region's
+    // own recipe chain. Shared ores that merely also spawn here stay in reserve.
+    const zh = this.state.lang === 'zh';
+    const objectiveDef = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, (this.state.currentLevel || 1) - 1))];
+    const sceneDef = this._sceneLevelDef() || objectiveDef;
+    const sceneRegion = sceneDef ? REGIONS[sceneDef.regionId] : null;
+    const isPostGame = Boolean(this.state.launchedHome);
+    const shortRegion = sceneRegion ? this._regionShortName(sceneRegion.id) : '';
+
+    if (isPostGame && shortRegion) {
+      this.invHeaderEl.textContent = zh
+        ? `📡 ${shortRegion} · 科考物资`
+        : `📡 ${shortRegion} · Expedition Cargo`;
+    } else if (shortRegion) {
+      this.invHeaderEl.textContent = `${shortRegion} · ${this.state.ui('inventoryTitle')}`;
+    } else {
+      this.invHeaderEl.textContent = this.state.ui('inventoryTitle');
+    }
+
     clearChildren(this.invGridEl);
     const heldEntries = Object.values(MATERIALS).filter(
       (m) => this.state.getItemCount(m.id) > 0
@@ -901,22 +1194,196 @@ export class HudController {
       count: totalItemCount
     })} ▸`;
 
-    if (heldEntries.length === 0) {
+    if (isPostGame) {
+      const beaconProg = this.state.getMechanismProgress('weather_beacons');
+      const logsDone = Object.keys(this.state.logsRead).length;
+      const logsTotal = Object.keys(CREW_LOGS).length;
+      const hwProg =
+        typeof this.state.getHomeworldProgress === 'function'
+          ? this.state.getHomeworldProgress()
+          : { doneSteps: 0, totalSteps: 5 };
+      for (const [col, txt] of [
+        ['#66ffc2', `${zh ? '遥测信标' : 'Beacons'} ${beaconProg.done}/${beaconProg.total}`],
+        ['#78f5ff', `${zh ? '船员日志' : 'Crew Logs'} ${logsDone}/${logsTotal}`],
+        ['#ffd266', `${zh ? '母星巡检' : 'Valley Watch'} ${hwProg.doneSteps}/${hwProg.totalSteps}`]
+      ]) {
+        const bChip = el('div', 'inv-chip current-zone');
+        const bDot = el('span', 'inv-dot');
+        bDot.style.backgroundColor = col;
+        bChip.append(bDot, el('span', '', txt));
+        this.invGridEl.appendChild(bChip);
+      }
+    }
+
+    const focusMatIds = new Set();
+    if (sceneDef) {
+      focusMatIds.add(sceneDef.requiredComponentId);
+      for (const mat of Object.values(MATERIALS)) {
+        if (Array.isArray(mat.sourceRegions) && mat.sourceRegions[0] === sceneDef.regionId) {
+          focusMatIds.add(mat.id);
+        }
+      }
+      for (const rec of RECIPES) {
+        if (rec.unlockLevel !== sceneDef.level) continue;
+        focusMatIds.add(rec.output.id);
+        for (const inp of rec.inputs) {
+          const source = MATERIALS[inp.id]?.sourceRegions;
+          if (!source || source[0] === sceneDef.regionId) focusMatIds.add(inp.id);
+        }
+      }
+    }
+
+    // Sort held items: Current-scene focus materials FIRST, then ship modules/subcomponents, then older leftovers
+    const sortedHeld = heldEntries.slice().sort((a, b) => {
+      const fa = focusMatIds.has(a.id) ? 0 : 1;
+      const fb = focusMatIds.has(b.id) ? 0 : 1;
+      if (fa !== fb) return fa - fb;
+      return 0;
+    });
+
+    for (const mat of sortedHeld) {
+      const isFocus = focusMatIds.has(mat.id);
+      const chip = el('div', `inv-chip${isFocus ? ' current-zone' : ' reserve-zone'}`);
+      const dot = el('span', 'inv-dot');
+      dot.style.backgroundColor = mat.color;
+      const label = el('span', '', this.state.text(mat.name));
+      const cnt = el('span', 'inv-count', `×${this.state.getItemCount(mat.id)}`);
+      chip.append(dot, label, cnt);
+      this.invGridEl.appendChild(chip);
+    }
+
+    const showLocalTargets = sceneDef && (isPostGame || sceneDef.level === (this.state.currentLevel || 1));
+    if (showLocalTargets) {
+      const uncollectedBiomeRaws = Object.values(MATERIALS).filter(
+        (m) =>
+          m.category === 'raw' &&
+          Array.isArray(m.sourceRegions) &&
+          m.sourceRegions[0] === sceneDef.regionId &&
+          this.state.getItemCount(m.id) === 0
+      );
+      for (const rawMat of uncollectedBiomeRaws) {
+        const hintChip = el('div', 'inv-chip zone-target');
+        const dot = el('span', 'inv-dot');
+        dot.style.backgroundColor = rawMat.color;
+        hintChip.append(
+          dot,
+          el('span', '', this.state.text(rawMat.name)),
+          el('span', 'inv-count', zh ? '待采' : '0')
+        );
+        this.invGridEl.appendChild(hintChip);
+      }
+    }
+
+    if (this.invGridEl.childNodes.length === 0) {
       this.invGridEl.appendChild(
         el('div', 'mission-summary', this.state.ui('emptyInventory'))
       );
-    } else {
-      for (const mat of heldEntries) {
-        const chip = el('div', 'inv-chip');
-        const dot = el('span', 'inv-dot');
-        dot.style.backgroundColor = mat.color;
-        const label = el('span', '', this.state.text(mat.name));
-        const cnt = el('span', 'inv-count', `×${this.state.getItemCount(mat.id)}`);
-        chip.append(dot, label, cnt);
-        this.invGridEl.appendChild(chip);
+    }
+    this._syncHomeworldBarTexts();
+    this._applyDrawerVisibility();
+  }
+
+  _renderHomeworldDrawers(foldText) {
+    if (!this.hwMissionWrap || !this.hwArchiveWrap || typeof this.state.getHomeworldProgress !== 'function') {
+      return;
+    }
+    const hwProg = this.state.getHomeworldProgress();
+    const zh = this.state.lang === 'zh';
+    const pctStr = `${Math.round(hwProg.fraction * 100)}%`;
+
+    this.hwTitleEl.textContent = hwProg.title;
+    this.hwSummaryEl.textContent = hwProg.summary;
+    this.hwFoldBtn.textContent = foldText;
+    this.hwBagFoldBtn.textContent = foldText;
+    this.hwProgFill.style.width = pctStr;
+    this.hwLeftTabLabel.textContent = `🌿 ${zh ? '家园巡检' : 'Watch'} (${hwProg.doneSteps}/${hwProg.totalSteps}) ▸`;
+    this.hwLeftMiniFill.style.width = pctStr;
+
+    clearChildren(this.hwStepsList);
+    for (const step of hwProg.steps) {
+      const row = el('div', `step-row${step.done ? ' done' : ''}${step.active ? ' here' : ''}`);
+      const prefix = step.done ? '✓ ' : step.active ? '▶ ' : '○ ';
+      row.append(
+        el('span', '', `${prefix}${step.label}`),
+        el('strong', '', `${step.current}/${step.needed}`)
+      );
+      this.hwStepsList.appendChild(row);
+    }
+
+    clearChildren(this.hwViewBtnWrap);
+    if (this.state.homeworldSurvey?.completed) {
+      const vBtn = el('button', 'hud-btn primary', `🏞️ ${this.state.text(HOMEWORLD_COPY.view)}`);
+      vBtn.style.width = '100%';
+      vBtn.addEventListener('click', () => this.actions.onHomeworldView?.());
+      this.hwViewBtnWrap.appendChild(vBtn);
+
+      if (hwProg.atmosphereUnlocked) {
+        const atmoRow = el('div', 'station-tabs');
+        atmoRow.style.marginTop = '6px';
+        atmoRow.style.flexWrap = 'wrap';
+        const curAtmo = hwProg.atmosphereMode || 'dawn';
+        for (const [mVal, mCopy] of [
+          ['dawn', HOMEWORLD_COPY.atmoDawn],
+          ['sunset', HOMEWORLD_COPY.atmoSunset],
+          ['night', HOMEWORLD_COPY.atmoNight]
+        ]) {
+          const ab = el(
+            'button',
+            `hud-btn${curAtmo === mVal ? ' primary' : ''}`,
+            this.state.text(mCopy)
+          );
+          ab.style.flex = '1 1 auto';
+          ab.addEventListener('click', () => {
+            this.sound.playUiClick();
+            this.state.setHomeworldAtmosphere(mVal);
+            this.showToast(
+              `${this.state.text(HOMEWORLD_COPY.atmoSwitched)}${this.state.text(mCopy)}`,
+              'celebrate'
+            );
+          });
+          atmoRow.appendChild(ab);
+        }
+        this.hwViewBtnWrap.appendChild(atmoRow);
       }
     }
-    this._applyDrawerVisibility();
+
+    if (this.hwTelemetrySection && this.hwTelemetryHeaderEl && this.hwTelemetryListEl) {
+      clearChildren(this.hwTelemetryListEl);
+      const links = Array.isArray(hwProg.telemetryLinks) ? hwProg.telemetryLinks : [];
+      if (links.length > 0) {
+        this.hwTelemetrySection.classList.remove('hidden');
+        this.hwTelemetryHeaderEl.textContent = zh
+          ? '跨星区科考遥测链路'
+          : 'Expedition Telemetry Links';
+        for (const link of links) {
+          const isDone = Boolean(link.completed ?? link.done);
+          const total = link.target ?? link.needed;
+          const item = el('div', `side-item${isDone ? ' done' : ''}`);
+          item.append(
+            el('div', '', `${isDone ? '★ ' : '• '}${link.label}: ${link.current}/${total}`),
+            el('div', 'side-reward', link.rewardText)
+          );
+          this.hwTelemetryListEl.appendChild(item);
+        }
+      } else {
+        this.hwTelemetrySection.classList.add('hidden');
+      }
+    }
+
+    this.hwArchiveTitleEl.textContent = zh ? '🏅 家园生态档案与纪念物' : '🏅 Valley Archives & Relics';
+    this.hwBagTab.textContent = `🏅 ${zh ? '家园档案' : 'Relics'} (${hwProg.unlockedArchiveCount}/${hwProg.archives.length}) ▸`;
+    clearChildren(this.hwArchiveGrid);
+    for (const item of hwProg.archives) {
+      const chip = el('div', `inv-chip ${item.unlocked ? 'current-zone' : 'zone-target'}`);
+      const dot = el('span', 'inv-dot');
+      dot.style.backgroundColor = item.color;
+      chip.append(
+        dot,
+        el('span', '', item.name),
+        el('span', 'inv-count', item.status)
+      );
+      this.hwArchiveGrid.appendChild(chip);
+    }
   }
 
   // --- Modals & Diegetic Workbench Drawer ---
@@ -928,12 +1395,19 @@ export class HudController {
     this.activeModal = null;
     this.confirmingReset = false;
     this.modalBackdrop.classList.add('hidden');
-    this.modalBackdrop.classList.remove('title-mode');
+    this.modalBackdrop.classList.remove('title-mode', 'ending-mode');
     this.workbenchDrawer.classList.add('hidden');
 
     if (prevModal === 'station') {
-      this.topLeft.classList.remove('hidden');
-      this.topRight.classList.remove('hidden');
+      if (!this.inHomeworldRoamMode) {
+        this.topLeft.classList.remove('hidden');
+        this.topRight.classList.remove('hidden');
+        // Workbench and blueprint views temporarily hide the compass. Invalidate
+        // its frame cache so the unchanged waypoint is painted again immediately
+        // after closing instead of leaving navigation hidden forever.
+        this._lastCompassSig = '';
+        this.topCenter.classList.remove('hidden');
+      }
       if (this.actions.onCloseStation) {
         this.actions.onCloseStation();
       }
@@ -994,24 +1468,32 @@ export class HudController {
     this.modalPanel.appendChild(wrap);
   }
 
-  openStationModal(stationMode = 'furnace') {
+  openStationModal(stationMode = 'furnace', stationFacility = null) {
     this.activeModal = 'station';
     this.stationInteractive = true;
+    this.activeStationFacility = stationFacility;
     this.modalBackdrop.classList.add('hidden');
     // Keep left viewport clean so player clearly sees Milo & the live 3D machine!
     this.topLeft.classList.add('hidden');
     this.topRight.classList.add('hidden');
     this.topCenter.classList.add('hidden');
 
-    if (stationMode === 'both') {
+    const supportedKinds =
+      stationFacility && Array.isArray(stationFacility.stationKinds)
+        ? stationFacility.stationKinds
+        : stationMode === 'both'
+          ? Object.keys(STATION_TYPES)
+          : [stationMode];
+
+    if (supportedKinds.length > 1) {
       this.workbenchMode = 'outpost';
-      this.stationFilter = 'furnace';
-    } else if (stationMode === 'furnace') {
-      this.workbenchMode = 'furnace';
-      this.stationFilter = 'furnace';
+      // Default field workstations directly to Current-Level Focus so new-biome recipes appear cleanly!
+      this.stationFilter = 'level_focus';
     } else {
-      this.workbenchMode = 'fabricator';
-      this.stationFilter = 'fabricator';
+      const singleKind = supportedKinds[0] || 'furnace';
+      const stMeta = STATION_TYPES[singleKind] || STATION_TYPES.furnace;
+      this.workbenchMode = stMeta.themeClass || singleKind;
+      this.stationFilter = singleKind;
     }
 
     this.workbenchDrawer.className = `workbench-drawer theme-${this.workbenchMode}`;
@@ -1019,8 +1501,13 @@ export class HudController {
   }
 
   openRecipeGuide() {
+    if (this.inHomeworldRoamMode) {
+      this.actions.onHomeworldJournal?.();
+      return;
+    }
     this.activeModal = 'station';
     this.stationInteractive = false;
+    this.activeStationFacility = null;
     this.workbenchMode = 'handbook';
     this.stationFilter = 'all';
     this.modalBackdrop.classList.add('hidden');
@@ -1032,318 +1519,16 @@ export class HudController {
     this._renderWorkbenchBody();
   }
 
+  _formatSolarFluxBadge() {
+    return formatSolarFluxBadge(this);
+  }
+
   _renderQueueOnly(force = false) {
-    if (!this.queueBoxEl) return;
-    const head = this.state.craftingQueue[0];
-    const headPct = head
-      ? Math.round(((head.total - head.remaining) / head.total) * 100)
-      : -1;
-    const sig = `${this.state.lang}|${this.state.craftingQueue.length}|${head ? head.jobId : 0}|${headPct}`;
-    if (!force && this._lastQueueSig === sig) return;
-    this._lastQueueSig = sig;
-
-    clearChildren(this.queueBoxEl);
-    const title = el('div', 'section-label', this.state.ui('activeQueue'));
-    this.queueBoxEl.appendChild(title);
-
-    if (this.state.craftingQueue.length === 0) {
-      this.queueBoxEl.appendChild(
-        el('div', 'recipe-io', this.state.ui('queueEmpty'))
-      );
-      return;
-    }
-
-    this.state.craftingQueue.forEach((job, idx) => {
-      const rec = RECIPES.find((r) => r.id === job.recipeId);
-      const outMat = MATERIALS[rec.output.id];
-      const pct = Math.round(((job.total - job.remaining) / job.total) * 100);
-      const row = el(
-        'div',
-        'recipe-io',
-        `${idx + 1}. ${this.state.text(outMat.name)} — ${pct}%`
-      );
-      this.queueBoxEl.appendChild(row);
-      if (idx === 0) {
-        const track = el('div', 'progress-bar-track');
-        track.style.marginTop = '5px';
-        const fill = el('div', 'progress-bar-fill');
-        fill.style.width = `${pct}%`;
-        track.appendChild(fill);
-        this.queueBoxEl.appendChild(track);
-      }
-    });
+    return renderQueueOnly(this, force);
   }
 
   _renderWorkbenchBody() {
-    clearChildren(this.workbenchDrawer);
-
-    // 1. Thematic Station / Handbook Header
-    const header = el('div', 'wb-header');
-    const titleRow = el('div', 'wb-title-row');
-
-    let emblemIcon = '📖';
-    let mainTitle = this.state.ui('handbookTitle');
-    let subTitle = this.state.ui('handbookSub');
-
-    if (this.workbenchMode === 'furnace') {
-      emblemIcon = '🔥';
-      mainTitle = this.state.ui('btnFurnace');
-      subTitle = this.state.ui('furnaceSub');
-    } else if (this.workbenchMode === 'fabricator') {
-      emblemIcon = '⚙️';
-      mainTitle = this.state.ui('btnFabricator');
-      subTitle = this.state.ui('fabricatorSub');
-    } else if (this.workbenchMode === 'outpost') {
-      emblemIcon = '🧪';
-      mainTitle =
-        this.state.lang === 'zh'
-          ? '前哨科研双模工程台'
-          : 'Outpost Field Dual-Workbench';
-      subTitle = this.state.ui('outpostSub');
-    }
-
-    const emblem = el('div', 'wb-emblem', emblemIcon);
-    const titleTextCol = el('div');
-    titleTextCol.append(
-      el('div', 'wb-title', mainTitle),
-      el('div', 'wb-subtitle', subTitle)
-    );
-    titleRow.append(emblem, titleTextCol);
-    header.append(titleRow, this._makeCloseButton());
-    this.workbenchDrawer.appendChild(header);
-
-    // 2. Mode Tabs (for Outpost Dual-Workbench OR Portable Blueprint Pad [C])
-    if (this.workbenchMode === 'outpost') {
-      const bar = el('div', 'wb-controls-bar');
-      for (const [modeKey, label] of [
-        ['furnace', `🔥 ${this.state.ui('filterFurnace')}`],
-        ['fabricator', `⚙️ ${this.state.ui('filterFabricator')}`]
-      ]) {
-        const b = el(
-          'button',
-          `hud-btn${this.stationFilter === modeKey ? ' primary' : ''}`,
-          label
-        );
-        b.addEventListener('click', () => {
-          this.sound.playUiClick();
-          this.stationFilter = modeKey;
-          this._renderWorkbenchBody();
-        });
-        bar.appendChild(b);
-      }
-      this.workbenchDrawer.appendChild(bar);
-    } else if (this.workbenchMode === 'handbook') {
-      const bar = el('div', 'wb-controls-bar');
-      for (const [modeKey, label] of [
-        ['all', this.state.ui('filterAll')],
-        ['furnace', `🔥 ${this.state.ui('filterFurnace')}`],
-        ['fabricator', `⚙️ ${this.state.ui('filterFabricator')}`]
-      ]) {
-        const b = el(
-          'button',
-          `hud-btn${this.stationFilter === modeKey ? ' primary' : ''}`,
-          label
-        );
-        b.addEventListener('click', () => {
-          this.sound.playUiClick();
-          this.stationFilter = modeKey;
-          this._renderWorkbenchBody();
-        });
-        bar.appendChild(b);
-      }
-      this.workbenchDrawer.appendChild(bar);
-    }
-
-    // 3. Live Processing Queue Strip (shown on real workstations or if queue has active jobs)
-    if (this.stationInteractive || this.state.craftingQueue.length > 0) {
-      this.queueBoxEl = el('div', 'wb-queue-strip');
-      this._renderQueueOnly(true);
-      this.workbenchDrawer.appendChild(this.queueBoxEl);
-    } else {
-      this.queueBoxEl = null;
-    }
-
-    // 4. Tactile Schematic Recipe Cards
-    const scrollBody = el('div', 'wb-scroll-body');
-    const filteredRecipes = RECIPES.filter((r) =>
-      this.stationFilter === 'all' ? true : r.station === this.stationFilter
-    ).sort((a, b) => {
-      const ua = a.unlockLevel <= this.state.currentLevel ? 0 : 1;
-      const ub = b.unlockLevel <= this.state.currentLevel ? 0 : 1;
-      if (ua !== ub) return ua - ub;
-      const da = this.state.diagnoseRecipe(a.id).ok ? 0 : 1;
-      const db = this.state.diagnoseRecipe(b.id).ok ? 0 : 1;
-      if (da !== db) return da - db;
-      return a.unlockLevel - b.unlockLevel;
-    });
-
-    const isFurnaceSkin = this.workbenchMode === 'furnace';
-    const primaryBtnClass = isFurnaceSkin ? 'amber-primary' : 'primary';
-
-    for (const rec of filteredRecipes) {
-      const unlocked = rec.unlockLevel <= this.state.currentLevel;
-      const diag = this.state.diagnoseRecipe(rec.id);
-      const outMat = MATERIALS[rec.output.id];
-
-      const card = el(
-        'div',
-        `schematic-card${diag.ok ? ' ready' : ''}${!unlocked ? ' locked' : ''}`
-      );
-
-      // --- Card Top Row: Icon + Output Name + Category Badge + Action Buttons ---
-      const topRow = el('div', 'schematic-top');
-      const outInfo = el('div', 'schematic-out-info');
-      outInfo.appendChild(createMaterialIconCanvas(outMat, false));
-
-      const outTextCol = el('div');
-      outTextCol.appendChild(
-        el('div', 'schematic-title', `${this.state.text(outMat.name)} ×${rec.output.count}`)
-      );
-
-      const catKey =
-        outMat.category === 'ship_module'
-          ? 'badgeShipCore'
-          : outMat.category === 'equipment'
-            ? 'badgeEquipment'
-            : outMat.category === 'subcomponent'
-              ? 'badgeSubAssembly'
-              : 'badgeRefined';
-      outTextCol.appendChild(
-        el(
-          'span',
-          `schematic-cat-badge${outMat.category === 'ship_module' || outMat.category === 'equipment' ? ' core' : ''}`,
-          this.state.ui(catKey)
-        )
-      );
-      outInfo.appendChild(outTextCol);
-
-      // Right side of Top Row: Interactive Craft Buttons vs Field Handbook Station Badge!
-      const rightCtrl = el('div', 'recipe-actions');
-      if (diag.reason === 'already_crafted_main') {
-        rightCtrl.appendChild(
-          el('span', 'ship-pill online', `✓ ${this.state.ui('btnCraftedOnce')}`)
-        );
-      } else if (diag.reason === 'already_equipped') {
-        rightCtrl.appendChild(
-          el('span', 'ship-pill online', this.state.ui('btnEquipped'))
-        );
-      } else if (this.stationInteractive) {
-        const btn = el(
-          'button',
-          `hud-btn${diag.ok ? ` ${primaryBtnClass}` : ''}`,
-          this.state.ui('btnCraft')
-        );
-        btn.disabled = !diag.ok;
-        btn.addEventListener('click', () => {
-          const res = this.state.startCraft(rec.id);
-          if (res.ok) {
-            this.sound.playCraftStart(rec.station);
-            this._renderWorkbenchBody();
-          } else {
-            this.sound.playError();
-          }
-        });
-        rightCtrl.appendChild(btn);
-
-        const maxBatch = this.state.getMaxCraftableCount(rec.id);
-        if (!rec.oneTimeMainComponent && maxBatch >= 2) {
-          const batchCount = Math.min(maxBatch, 4);
-          const batchBtn = el(
-            'button',
-            `hud-btn ${primaryBtnClass}`,
-            this.state.ui('btnCraftBatch', { count: batchCount })
-          );
-          batchBtn.addEventListener('click', () => {
-            let started = 0;
-            for (let i = 0; i < batchCount; i++) {
-              const r = this.state.startCraft(rec.id);
-              if (r.ok) started++;
-              else break;
-            }
-            if (started > 0) {
-              this.sound.playCraftStart(rec.station);
-              this._renderWorkbenchBody();
-            } else {
-              this.sound.playError();
-            }
-          });
-          rightCtrl.appendChild(batchBtn);
-        }
-      } else {
-        // In Portable Blueprint Pad [C]: clean informational station badge instead of confusing disabled Craft button!
-        const stName =
-          rec.station === 'furnace'
-            ? `🔥 ${this.state.ui('btnFurnace')}`
-            : `⚙️ ${this.state.ui('btnFabricator')}`;
-        rightCtrl.appendChild(
-          el('span', 'station-loc-pill', this.state.ui('goStationHint', { station: stName }))
-        );
-      }
-
-      topRow.append(outInfo, rightCtrl);
-      card.appendChild(topRow);
-
-      // --- Card Middle Row: Visual Ingredient Schematic Flow ---
-      const flowRow = el('div', 'schematic-flow');
-      const inputsWrap = el('div', 'schematic-inputs');
-
-      rec.inputs.forEach((inp, idx) => {
-        if (idx > 0) {
-          inputsWrap.appendChild(el('span', 'flow-arrow', '+'));
-        }
-        const m = MATERIALS[inp.id];
-        const have = this.state.getItemCount(inp.id);
-        const enough = have >= inp.count;
-        const pill = el('div', `ing-pill ${enough ? 'enough' : 'short'}`);
-        pill.appendChild(createMaterialIconCanvas(m, true));
-        pill.appendChild(el('span', '', this.state.text(m.name)));
-        pill.appendChild(el('span', 'ing-qty', `${have}/${inp.count}`));
-        inputsWrap.appendChild(pill);
-      });
-
-      const processSymbol = rec.station === 'furnace' ? '━━🔥━━▶' : '━━⚡━━▶';
-      const outSummary = el(
-        'span',
-        'flow-arrow',
-        `${processSymbol} ×${rec.output.count}`
-      );
-      flowRow.append(inputsWrap, outSummary);
-      card.appendChild(flowRow);
-
-      // --- Card Footer: Unlock Level or Missing Source Region Guidance ---
-      if (!unlocked) {
-        card.appendChild(
-          el(
-            'div',
-            'schematic-footer',
-            `🔒 ${this.state.ui('unlockedAtLevel', { level: rec.unlockLevel })}`
-          )
-        );
-      } else if (diag.missing.length > 0 && diag.reason !== 'already_crafted_main') {
-        const missText = diag.missing
-          .map((m) => {
-            const name = this.state.text(MATERIALS[m.id].name);
-            const where = m.craftedIn
-              ? m.craftedIn === 'furnace'
-                ? this.state.ui('btnFurnace')
-                : this.state.ui('btnFabricator')
-              : m.regions.join(' / ');
-            return `${m.missingCount}× ${name} (${where})`;
-          })
-          .join(' • ');
-        card.appendChild(
-          el(
-            'div',
-            'schematic-footer',
-            `📍 ${this.state.ui('missingMaterials', { items: missText })}`
-          )
-        );
-      }
-
-      scrollBody.appendChild(card);
-    }
-
-    this.workbenchDrawer.appendChild(scrollBody);
+    return renderWorkbenchBody(this);
   }
 
   openInspectModal(titleText, bodyText) {
@@ -1359,6 +1544,75 @@ export class HudController {
     body.style.marginTop = '8px';
 
     this.modalPanel.append(header, body);
+  }
+
+  openHomeworldJournal(activitySystem) {
+    if (!activitySystem) return;
+    this._homeworldActivity = activitySystem;
+    this.openInspectModal(this.state.text(HOMEWORLD_COPY.title), activitySystem.journalText());
+    this.activeModal = 'homeworld_journal';
+    this.modalPanel.lastChild.style.whiteSpace = 'pre-line';
+    if (this.state.homeworldSurvey.completed) {
+      if (this.state.isHomeworldAtmosphereUnlocked?.()) {
+        const curAtmo = this.state.getHomeworldAtmosphere();
+        const curCopy =
+          curAtmo === 'sunset'
+            ? HOMEWORLD_COPY.atmoSunset
+            : curAtmo === 'night'
+              ? HOMEWORLD_COPY.atmoNight
+              : HOMEWORLD_COPY.atmoDawn;
+        const atmoBtn = el(
+          'button',
+          'hud-btn',
+          `${this.state.text(HOMEWORLD_COPY.cycleAtmosphere)} · ${this.state.text(curCopy)}`
+        );
+        atmoBtn.style.marginRight = '8px';
+        atmoBtn.addEventListener('click', () => {
+          this.sound.playUiClick();
+          const next = this.state.cycleHomeworldAtmosphere();
+          const nextCopy =
+            next === 'sunset'
+              ? HOMEWORLD_COPY.atmoSunset
+              : next === 'night'
+                ? HOMEWORLD_COPY.atmoNight
+                : HOMEWORLD_COPY.atmoDawn;
+          this.showToast(
+            `${this.state.text(HOMEWORLD_COPY.atmoSwitched)}${this.state.text(nextCopy)}`,
+            'celebrate'
+          );
+          this.openHomeworldJournal(activitySystem);
+        });
+        this.modalPanel.appendChild(atmoBtn);
+      }
+      const view = el('button', 'hud-btn primary', this.state.text(HOMEWORLD_COPY.view));
+      view.addEventListener('click', () => this.actions.onHomeworldView?.());
+      this.modalPanel.appendChild(view);
+    }
+  }
+
+  openHomeworldCalibration(onSelect, feedback = '') {
+    this._homeworldCalibrationAction = onSelect;
+    this.openInspectModal(this.state.text(HOMEWORLD_COPY.calibrate), this.state.text(HOMEWORLD_COPY.sequence));
+    this.activeModal = 'homeworld_calibration';
+    const controls = el('div', 'hw-calibration-controls');
+    const stage = this.state.homeworldSurvey.calibration;
+    for (let i = 0; i < HOMEWORLD_CALIBRATION.length; i++) {
+      const step = HOMEWORLD_CALIBRATION[i];
+      const button = el('button', `hud-btn${i === stage ? ' primary' : ''}`,
+        `${i < stage ? '✓' : `${i + 1}.`} ${this.state.text(step.name)}`);
+      button.disabled = i < stage;
+      button.addEventListener('click', () => {
+        const result = onSelect(step.id);
+        const message = result.ok ? '' : this.state.text(result.reason === 'out_of_range' ?
+          { zh: '请返回能源站控制台旁操作。', en: 'Return to the power console to operate it.' } : HOMEWORLD_COPY.wrongOrder);
+        this.openHomeworldCalibration(onSelect, message);
+      });
+      controls.appendChild(button);
+    }
+    this.modalPanel.appendChild(controls);
+    if (feedback || stage === HOMEWORLD_CALIBRATION.length) {
+      this.modalPanel.appendChild(el('div', 'hero-sub', feedback || this.state.text(HOMEWORLD_COPY.restored)));
+    }
   }
 
   openLevelCompleteModal(levelDef) {
@@ -1389,196 +1643,15 @@ export class HudController {
   }
 
   openPauseModal() {
-    this.workbenchDrawer.classList.add('hidden');
-    this.topRight.classList.remove('hidden');
-    this.activeModal = 'pause';
-    this.modalBackdrop.classList.remove('hidden', 'title-mode');
-    clearChildren(this.modalPanel);
-
-    const header = el('div', 'modal-header');
-    header.append(
-      el('div', 'modal-title', this.state.ui('btnPause')),
-      this._makeCloseButton()
-    );
-    this.modalPanel.appendChild(header);
-
-    // 1. User-Customizable HUD & Non-Essential Hints Box!
-    const prefBox = el('div', 'queue-box');
-    prefBox.appendChild(el('div', 'section-label', this.state.ui('hudPrefsLabel')));
-    const prefRow = el('div', 'station-tabs');
-    prefRow.style.flexWrap = 'wrap';
-
-    const prefItems = [
-      ['guideArrow', 'prefGuideArrow'],
-      ['showCompass', 'prefTopCompass'],
-      ['showWorldLabels', 'prefWorldLabels'],
-      ['showIdleTips', 'prefIdleTips']
-    ];
-    for (const [pKey, labelKey] of prefItems) {
-      const enabled = this.state.settings[pKey] !== false;
-      const pb = el(
-        'button',
-        `hud-btn${enabled ? ' primary' : ''}`,
-        `${enabled ? '✓ ' : '○ '}${this.state.ui(labelKey)}`
-      );
-      pb.addEventListener('click', () => {
-        this.sound.playUiClick();
-        this.state.setHudPref(pKey, !enabled);
-        this.openPauseModal();
-      });
-      prefRow.appendChild(pb);
-    }
-    prefBox.appendChild(prefRow);
-    this.modalPanel.appendChild(prefBox);
-
-    // 2. Audio, Language & Graphics Quality Settings (accessible on mobile & small screens!)
-    const qBox = el('div', 'queue-box');
-    qBox.appendChild(el('div', 'section-label', this.state.ui('qualityLabel')));
-    const qRow = el('div', 'station-tabs');
-    qRow.style.flexWrap = 'wrap';
-    for (const [qVal, qKey] of [
-      ['ultra', 'qualityUltra'],
-      ['high', 'qualityHigh'],
-      ['medium', 'qualityMedium'],
-      ['low', 'qualityLow']
-    ]) {
-      const qb = el(
-        'button',
-        `hud-btn${this.state.settings.quality === qVal ? ' primary' : ''}`,
-        this.state.ui(qKey)
-      );
-      qb.addEventListener('click', () => {
-        this.sound.playUiClick();
-        this.state.setQuality(qVal);
-        this.actions.onQualityChange(qVal);
-        this.openPauseModal();
-      });
-      qRow.appendChild(qb);
-    }
-
-    const audioBtn = el(
-      'button',
-      `hud-btn${!this.state.settings.muted ? ' primary' : ''}`,
-      this.state.settings.muted ? this.state.ui('audioOff') : this.state.ui('audioOn')
-    );
-    audioBtn.addEventListener('click', () => {
-      this.state.setMuted(!this.state.settings.muted);
-      this.sound.setMuted(this.state.settings.muted);
-      if (!this.state.settings.muted) this.sound.playUiClick();
-      this.openPauseModal();
-    });
-
-    const langBtn = el('button', 'hud-btn', this.state.ui('langToggle'));
-    langBtn.addEventListener('click', () => {
-      this.sound.playUiClick();
-      this.state.setLang(this.state.lang === 'en' ? 'zh' : 'en');
-      this.openPauseModal();
-    });
-
-    qRow.append(audioBtn, langBtn);
-    qBox.appendChild(qRow);
-    this.modalPanel.appendChild(qBox);
-
-    // 2.5 Planetary Day-Night Cycle & Kharis-4 Desert Weather Controls!
-    const envBox = el('div', 'queue-box');
-    envBox.appendChild(el('div', 'section-label', this.state.ui('envTimeLabel')));
-    const timeRow = el('div', 'station-tabs');
-    timeRow.style.flexWrap = 'wrap';
-    const curTimeMode = this.state.settings.timeMode || 'cycle';
-    for (const [tVal, tKey] of [
-      ['cycle', 'timeCycle'],
-      ['day', 'timeDay'],
-      ['night', 'timeNight']
-    ]) {
-      const tb = el(
-        'button',
-        `hud-btn${curTimeMode === tVal ? ' primary' : ''}`,
-        this.state.ui(tKey)
-      );
-      tb.addEventListener('click', () => {
-        this.sound.playUiClick();
-        this.state.setTimeMode(tVal);
-        this.openPauseModal();
-      });
-      timeRow.appendChild(tb);
-    }
-    envBox.appendChild(timeRow);
-
-    const wLabel = el('div', 'section-label', this.state.ui('envWeatherLabel'));
-    wLabel.style.marginTop = '10px';
-    envBox.appendChild(wLabel);
-    const weatherRow = el('div', 'station-tabs');
-    weatherRow.style.flexWrap = 'wrap';
-    const curWeatherMode = this.state.settings.weatherMode || 'dynamic';
-    for (const [wVal, wKey] of [
-      ['dynamic', 'weatherDynamic'],
-      ['clear', 'weatherClear'],
-      ['overcast', 'weatherOvercast'],
-      ['sandstorm', 'weatherSandstorm']
-    ]) {
-      const wb = el(
-        'button',
-        `hud-btn${curWeatherMode === wVal ? ' primary' : ''}`,
-        this.state.ui(wKey)
-      );
-      wb.addEventListener('click', () => {
-        this.sound.playUiClick();
-        this.state.setWeatherMode(wVal);
-        this.openPauseModal();
-      });
-      weatherRow.appendChild(wb);
-    }
-    envBox.appendChild(weatherRow);
-    this.modalPanel.appendChild(envBox);
-
-    const actCol = el('div', 'recipe-grid');
-
-    const btnResume = el('button', 'hud-btn primary', this.state.ui('btnResume'));
-    btnResume.addEventListener('click', () => this.closeModal());
-
-    const btnUnstuck = el('button', 'hud-btn', this.state.ui('btnRestartLevel'));
-    btnUnstuck.addEventListener('click', () => {
-      this.closeModal();
-      this.actions.onUnstuck();
-    });
-
-    actCol.append(btnResume, btnUnstuck);
-
-    if (!this.confirmingReset) {
-      const btnReset = el('button', 'hud-btn', this.state.ui('btnResetGame'));
-      btnReset.addEventListener('click', () => {
-        this.sound.playUiClick();
-        this.confirmingReset = true;
-        this.openPauseModal();
-      });
-      actCol.appendChild(btnReset);
-    } else {
-      const confirmBox = el('div', 'queue-box');
-      confirmBox.appendChild(el('div', 'recipe-missing', this.state.ui('confirmReset')));
-      const cRow = el('div', 'station-tabs');
-      cRow.style.marginTop = '8px';
-      const yesBtn = el('button', 'hud-btn primary', this.state.ui('btnConfirmYes'));
-      yesBtn.addEventListener('click', () => {
-        this.closeModal();
-        this.actions.onResetGame();
-      });
-      const noBtn = el('button', 'hud-btn', this.state.ui('btnCancel'));
-      noBtn.addEventListener('click', () => {
-        this.confirmingReset = false;
-        this.openPauseModal();
-      });
-      cRow.append(yesBtn, noBtn);
-      confirmBox.appendChild(cRow);
-      actCol.appendChild(confirmBox);
-    }
-
-    this.modalPanel.appendChild(actCol);
+    return renderPauseModal(this, HOMEWORLD_HUD_COPY);
   }
 
   openEndingModal() {
     this.workbenchDrawer.classList.add('hidden');
     this.activeModal = 'ending';
+    this.setHomeworldRoamVisible(false);
     this.modalBackdrop.classList.remove('hidden', 'title-mode');
+    this.modalBackdrop.classList.add('ending-mode');
     clearChildren(this.modalPanel);
 
     const wrap = el('div', 'hero-panel');
@@ -1607,10 +1680,10 @@ export class HudController {
     }
 
     const actions = el('div', 'hero-actions');
-    const btnReplay = el('button', 'hud-btn primary', this.state.ui('btnReplayLaunch'));
-    btnReplay.addEventListener('click', () => {
+    const btnWalkHome = el('button', 'hud-btn primary', this.state.ui('btnWalkHomeworld'));
+    btnWalkHome.addEventListener('click', () => {
       this.closeModal();
-      this.actions.onReplayLaunch();
+      if (this.actions.onWalkHomeworld) this.actions.onWalkHomeworld();
     });
 
     const btnRoam = el('button', 'hud-btn', this.state.ui('btnFreeRoam'));
@@ -1619,13 +1692,19 @@ export class HudController {
       this.actions.onFreeRoam();
     });
 
+    const btnReplay = el('button', 'hud-btn', this.state.ui('btnReplayLaunch'));
+    btnReplay.addEventListener('click', () => {
+      this.closeModal();
+      this.actions.onReplayLaunch();
+    });
+
     const btnAgain = el('button', 'hud-btn', this.state.ui('btnPlayAgain'));
     btnAgain.addEventListener('click', () => {
       this.closeModal();
       this.actions.onResetGame();
     });
 
-    actions.append(btnReplay, btnRoam, btnAgain);
+    actions.append(btnWalkHome, btnRoam, btnReplay, btnAgain);
     wrap.append(title, sub, statsGrid, actions);
     this.modalPanel.appendChild(wrap);
   }

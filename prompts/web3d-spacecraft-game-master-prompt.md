@@ -3,7 +3,7 @@
 > **使用说明（跨模型复用指南）**：
 > 以下代码块内为完整的增强版生产级 Prompt：
 > - **前半部分（Section 1 ~ Technical Implementation Guidance）** 完整保留原始需求规格；
-> - **后半部分（Section 14 ~ Section 20：Production Quality & Multi-Platform Upgrade Specification）** 融合了本项目多轮实战打磨沉淀的全部工程与体验准则（开场三幕叙事过渡、装备驱动的飞行与声呐钻地玩法、程序化 3D 雕刻与 PBR/IBL/Bloom 视觉管线、空间化全息工坊 UI、DAG 净缺口智能导航、Web Audio 互动声景、可收起胶囊侧拉栏、移动端多指触控及性能/竞态加固）。
+> - **后半部分（Section 14 ~ Section 21）** 融合本项目到 v1.0.1 的实战准则：程序化雕刻与 GPU PBR、接触软阴影、屏幕空间环境光遮蔽与体积光、昼夜与晴/阴/沙暴、弹簧臂防穿模、过场与环境探针交接、DAG 引导、全息工坊、Web Audio、胶囊 HUD、多指触控，以及已经踩过的坑。Section 14 里的选择性辉光阈值仍然有效；当前成片管线以 Section 21 为准，不要再退回单独的 `UnrealBloomPass`。
 >
 > 复制下方完整代码块投喂给任意模型 / Coding Agent 即可直接端到端复刻同等级品质的 Web 3D 独立游戏。
 
@@ -385,4 +385,58 @@ Synthesize a layered, non-fatiguing procedural soundscape with Web Audio API:
   - Use a tight character-following directional shadow frustum (`36m` snapped to `2m` grid) with `shadowMap.autoUpdate = false` (throttled `~20Hz` when moving, `0Hz` when idle);
   - Enforce an intelligent `60 FPS` frame pacer on `120Hz/144Hz` ProMotion screens (`~30–45 FPS` on paused/low-power states) and disable CSS `backdrop-filter: blur()` under `@media (pointer: coarse)` to eliminate WebGL compositor readback heat.
 - **Zero Per-Frame GC & Dirty-Checked DOM/Materials**: Reuse pre-allocated `Vector3`/`Color` scratch instances in main/cutscene loops, cache master 2D icon canvases via `drawImage`, cache DAG guidance per `(versionTick, 2m grid cell)`, and dirty-check all HUD text/style writes and Three.js material color updates.
+
+# 21. v1.0.1 Visual, Weather, Collision, and Handoff Rules
+
+Section 14 states the quality bar. This section is the pipeline that actually shipped, plus the failures that looked correct in isolation and broke in play.
+
+## Rendering
+
+- Bake PBR sets on the GPU at startup (`albedo` sRGB, ORM linear, height to Sobel normal). Do not ship external `.png` textures. Reuse sets with a world-space weathering shader instead of adding a new 1024px set per prop. Seven 1024px sets are already about 112 MB of GPU memory; more sets risk mobile tab kills.
+- Pre-bake two desert PMREM probes (day and night) plus one homeworld probe. Do not call `PMREMGenerator` every frame.
+- Desktop High/Ultra may use contact-hardening soft shadows (PCSS) injected into Three.js `shadowmap_pars_fragment`, with a compile-failure fallback to stock PCF. Keep the shadow frustum tight and follow the camera. Quantize the sun direction (about one step per 1.6s) so idle shadow updates stay throttled. Clamp the shadow sun elevation to at least ~16° so the frustum does not stretch to the horizon. Mobile and Low stay on stock shadows.
+- Render the scene to a linear HDR target, then run half-resolution SSAO, volumetric shafts, a small bloom pyramid, auto-exposure, and a filmic grade. The grade’s bloom/flare must stay selective: sand and UI stay sharp; furnace cores, crystals, and hard-light bridges glow. Low quality disables SSAO, volumetric shafts, and weather particles.
+- One infinite sky box (`gl_Position = p.xyww`) draws Rayleigh/Mie sky, a cloud deck, the Milky Way, and an analytic ringed gas giant. Export one shared direction constant for that planet. The sky uniform, night key-light azimuth, volumetric shaft direction, and brine-pool reflection must all copy that same vector.
+- Brine pools use an oblique-clipped planar reflection. Exclude HUD billboards, the headlamp cone, and weather particles from the reflection pass.
+
+## Day, Night, and Desert Weather
+
+- A full day is about 7 minutes (`cycle` / locked `day` / locked `night`). Weather is clear, overcast, or sandstorm (`dynamic` or a lock). Do not add rain or snow on this desert planet.
+- Dynamic weather stays clear for the first 150 seconds of Level 1 **active play**. The title-screen orbit must not increment that timer and must not roll a sandstorm. Starting or resetting a mission resets phase, night weight, and storm weight to a clear morning. The intro cutscene forces a daylight look; if you only overwrite sky uniforms and leave the atmosphere weights untouched, the first gameplay frame snaps back to night or storm.
+- Night and sandstorm turn on the robot’s headlamp. Sandstorm streaks are stateless GPU instances wrapped around the camera in the vertex shader. Do not iterate particles on the CPU.
+- Persist `cyclePhase` and active play time with the save. A reload should not silently jump back to morning while the player’s weather lock is sandstorm.
+
+## Collision and Camera
+
+- Every solid the robot can walk into needs a collider: fuselage, wings, pods, berms, rocks, and resource nodes. Wing colliders are height-capped so the jetpack can fly over them.
+- The spring arm tests the look-at to camera segment against elevated platforms and colliders marked `occluder`. Wings must be occluders with a vertical thickness (`occluderMinY` .. `maxY`). A cylinder test that ignores the bottom face pulls the camera down when the sightline is above the wing. A fuselage-only occluder list lets the camera pass through the wings.
+- Workstation close-ups and showcase shots must run the same terrain-lift and spring-arm solve. Returning early from those modes puts the camera inside the hull.
+- Run depenetration while moving or airborne (3 iterations) and one extra pass while standing still, so a landing that stops inside a corner still slides out. Do not play gate-bump sounds on that idle pass.
+- Apply a scripted cutscene pose after `robot.update()`. If update runs second, it writes the robot back onto desert terrain and destroys a homeworld pose at `Y = 420`. Shadow follow must use the ship’s current Y, not a hardcoded 0.
+
+## Cutscene and Probe Handoff
+
+- Compare `scene.environment` to the desired probe object. A boolean “already using night” cache lies after a cutscene or `restoreDesertPlacement()` assigns the day probe directly.
+- The launch cutscene must set meadow key light, hemisphere light, and shadow offset when the ship lands at home. Changing only the sky palette leaves a bright meadow under moonlight.
+- Run the launch lighting override after the cutscene frame, because the frame also assigns `scene.environment`. On returning to free roam, call one atmosphere update immediately so a night save rebinds the night probe on the first frame.
+- Intro, launch, and ending must zero weather particles, headlamp, and storm audio.
+
+## Guidance and Saves
+
+- When an input is still in the crafting queue, point the player at the station that actually produces it. A fabricator sub-assembly must not send the player to the furnace.
+- Folding an in-flight queue into the save is intentional: closing the tab must not delete inputs that were already consumed. Also fold `craftedEver` and `totalCrafted` in that snapshot, and persist node regrow timers. Do not increment those counters in live memory until the job really finishes, or a save that is still pending will double-count.
+
+## Pitfalls Already Hit
+
+- `THREE.Color` has no `.normalize()`. Normalize a `Vector3`.
+- Shader uniform updates go to `uniform.value`. Calling `.copy()` on the uniform object throws.
+- The depth compare constant is `THREE.LessEqualDepth`, not `LEqualDepth`.
+- Volumetric light that follows the clamped shadow direction sits above the visible sun at sunset. Shafts and water glints follow the visual sun or the shared planet direction. The shadow map may stay elevated.
+- Homeworld `setMode` must clear night and dust weights. Gameplay atmosphere code must not keep writing desert night colors during that cutscene.
+- Windows PowerShell 5.1 rejects `&&`. Run `npm run build` and `npm run verify` as separate commands.
+- Report the built file name `starweaver-<version>-<YYYYMMDD-HHmmss>.html`, the `version` and `build-time` meta tags, and the exact byte size. The build copies that file to `docs/index.html`. Do not hand-edit the copy.
+- **Standalone Splash & Deferred Scene Safety**: Inline `#boot-splash` CSS and DOM from `index.html` into the standalone HTML build (and verify it in pre-build checks). Any deferred/lazy scene (`deferHomeworld: true`) must still initialize all arrays read by the camera/physics loop (e.g. `homeworldCameraOccluders = []`) in the constructor so `[...occluders]` never throws.
+- **Soft Particles & Sign/Cliff Geometry Hygiene**: Use a dedicated zero-GC `THREE.Points` radial-falloff `ShaderMaterial` (`gl_PointCoord`, `depthWrite: false`, per-particle `aAlpha`) for wheel dust and steam plumes — never reuse low-poly `IcosahedronGeometry(..., 0)`. Keep 3D signpost poles narrower than the board's half-thickness and terminating at the bottom frame edge. Match cliff/mesa collider radii to each archetype's actual `bottomRadius` so players cannot walk inside hollow single-sided rock meshes.
+- **Three-State Crafting Copy & Inspectable Landmarks**: Never label a main-story component or permanent equipment as “Installed / Equipped” while it is still in the crafting queue or sitting in the backpack awaiting ship installation; render distinct states (`In Crafting Queue`, `Crafted • Install on Ship`, `Installed on Ship` / `Equipped`). Give non-harvestable focal landmarks (reactor cores, research domes, monolith ruins) clear structural framing and `[E]`/`[F]` inspect lore so players do not mistake them for broken harvest nodes.
+- **Pre-Build Gate**: Run `npm run gate` (`prebuild-check.mjs` -> `build` -> `verify` -> `audit-standalone-html.mjs`) after every feature/scene change.
 ```

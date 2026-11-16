@@ -17,9 +17,9 @@ export class PlanarReflectionSystem {
     this.renderTarget = new THREE.WebGLRenderTarget(512, 256, {
       format: THREE.RGBAFormat,
       type: THREE.HalfFloatType,
-      minFilter: THREE.LinearMipmapLinearFilter,
+      minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
-      generateMipmaps: true,
+      generateMipmaps: false,
       depthBuffer: true,
       stencilBuffer: false
     });
@@ -42,6 +42,10 @@ export class PlanarReflectionSystem {
     this._qVec = new THREE.Vector4();
     this._drawSize = new THREE.Vector2();
     this._upNormal = new THREE.Vector3(0, 1, 0);
+    this._viewProjection = new THREE.Matrix4();
+    this._mainFrustum = new THREE.Frustum();
+    this._poolWorldBounds = new THREE.Sphere();
+    this._poolWorldPos = new THREE.Vector3();
 
     this.pools = [];
     this.excludeObjects = [];
@@ -56,6 +60,7 @@ export class PlanarReflectionSystem {
       uReflMatrix: { value: this.textureMatrix },
       uReflActive: { value: 0 },
       uNightFactor: { value: 0 },
+      uWeatherClarity: { value: 1.0 },
       uSunDir: { value: new THREE.Vector3(42, 64, 28).normalize() }
     };
   }
@@ -76,11 +81,11 @@ export class PlanarReflectionSystem {
       this.resolutionScale = 0.35;
     } else if (quality === 'ultra') {
       this.enabled = true;
-      this.resolutionScale = isMobile ? 0.45 : 0.72;
+      this.resolutionScale = isMobile ? 0.42 : 0.56;
     } else {
       // 'high'
       this.enabled = true;
-      this.resolutionScale = isMobile ? 0.38 : 0.52;
+      this.resolutionScale = isMobile ? 0.36 : 0.48;
     }
   }
 
@@ -100,8 +105,10 @@ export class PlanarReflectionSystem {
     sandColor = '#b87c52',
     normalMap = null
   }) {
-    const geo = new THREE.PlaneGeometry(radiusX * 2.5, radiusZ * 2.5, 40, 40);
+    const segs = Math.max(40, Math.min(72, Math.round(Math.max(radiusX, radiusZ) * 4)));
+    const geo = new THREE.PlaneGeometry(radiusX * 2.5, radiusZ * 2.5, segs, segs);
     geo.rotateX(-Math.PI / 2);
+    geo.computeBoundingSphere();
 
     const poolUniforms = {
       uTime: this.sharedUniforms.uTime,
@@ -109,6 +116,7 @@ export class PlanarReflectionSystem {
       uReflMatrix: this.sharedUniforms.uReflMatrix,
       uReflActive: this.sharedUniforms.uReflActive,
       uNightFactor: this.sharedUniforms.uNightFactor,
+      uWeatherClarity: this.sharedUniforms.uWeatherClarity,
       uSunDir: this.sharedUniforms.uSunDir,
       uPoolHalf: { value: new THREE.Vector2(radiusX, radiusZ) },
       uDeepCol: { value: new THREE.Color(tintDeep) },
@@ -147,6 +155,7 @@ export class PlanarReflectionSystem {
         uniform mat4 uReflMatrix;
         uniform float uReflActive;
         uniform float uNightFactor;
+        uniform float uWeatherClarity;
         uniform float uIsCurrentPlane;
         uniform vec3 uSunDir;
         uniform vec2 uPoolHalf;
@@ -187,8 +196,10 @@ export class PlanarReflectionSystem {
         void main() {
           vec2 q = vLocalXZ / max(uPoolHalf, vec2(0.1));
           float baseR = length(q);
-          float shoreNoise = (fbmPool(vWorldPos.xz * 0.68 + 3.1) - 0.5) * 0.34 +
-                             (fbmPool(vWorldPos.xz * 2.3 - 1.7) - 0.5) * 0.12;
+          float panScale = clamp(4.2 / max(uPoolHalf.x, uPoolHalf.y), 0.30, 1.0);
+          float macroBay = (fbmPool(q * 2.4 + 1.9) - 0.5) * 0.22 * (1.0 - panScale);
+          float shoreNoise = ((fbmPool(vWorldPos.xz * 0.68 + 3.1) - 0.5) * 0.34 +
+                             (fbmPool(vWorldPos.xz * 2.3 - 1.7) - 0.5) * 0.12) * panScale + macroBay;
           float dist = baseR + shoreNoise;
 
           // Outer damp-sand halo (dist 0.88 -> 1.18), inner liquid pool (dist < 0.88)
@@ -228,15 +239,19 @@ export class PlanarReflectionSystem {
             reflCol = texture2D(uReflMap, ruv).rgb;
           }
 
-          // Sun specular glitter across brine ripples
+          // Sun/planet specular glitter across brine ripples (attenuated by overcast & sandstorm haze)
           vec3 L = normalize(uSunDir);
           vec3 H = normalize(L + V);
-          float spec = pow(max(dot(N, H), 0.0), 220.0) * 3.8 * puddleMask;
+          float clarity = clamp(uWeatherClarity, 0.18, 1.0);
+          float spec = pow(max(dot(N, H), 0.0), 220.0) * 3.8 * puddleMask * clarity;
           vec3 specCol = vec3(1.0, 0.93, 0.78) * spec;
 
-          // Liquid absorption tint + mineral turquoise rim + white crystalline salt ring
+          // Liquid absorption tint + mineral turquoise rim + weather-modulated mirror reflectivity
           vec3 liquidBody = mix(uRimCol * 0.68, uDeepCol, smoothstep(0.05, 0.85, waterDepth));
-          vec3 waterCol = mix(liquidBody, reflCol, clamp(fresnel * 0.92 + 0.16, 0.0, 0.96)) + specCol;
+          vec3 stormTurbid = mix(vec3(0.56, 0.44, 0.34), vec3(0.14, 0.16, 0.22), uNightFactor);
+          liquidBody = mix(stormTurbid, liquidBody, mix(0.45, 1.0, clarity));
+          float reflWeight = clamp((fresnel * 0.92 + 0.16) * mix(0.28, 1.0, clarity), 0.0, 0.96);
+          vec3 waterCol = mix(liquidBody, reflCol, reflWeight) + specCol;
 
           // Damp dark sand bank outside liquid rim + pale evaporite salt crust at shoreline
           vec3 dampSand = uWetSandCol * 0.54;
@@ -254,21 +269,58 @@ export class PlanarReflectionSystem {
     mesh.rotation.y = rotationY;
     mesh.renderOrder = 2;
 
+    const edgeRadius = Math.max(radiusX, radiusZ);
     const poolRecord = {
       mesh,
       uniforms: poolUniforms,
       x,
       y,
       z,
-      maxRadius: Math.max(radiusX, radiusZ) * 1.3
+      edgeRadius,
+      maxRadius: edgeRadius * 1.3
     };
     this.pools.push(poolRecord);
     return mesh;
   }
 
+  /**
+   * Registers an existing water surface mesh (such as the Homeworld Emerald Valley mirror pond & stream at Y = 420.012)
+   * with the planar reflection system, binding shared reflection uniforms so it reflects mountains, monument & sunset/night skies.
+   */
+  registerWaterSurface(mesh, waterUniforms = null, edgeRadius = 24.0) {
+    if (!mesh || !mesh.geometry) return null;
+    if (!mesh.geometry.boundingSphere) {
+      mesh.geometry.computeBoundingSphere();
+    }
+    const uniforms = waterUniforms || mesh.material?.uniforms || {};
+    uniforms.uReflMap = this.sharedUniforms.uReflMap;
+    uniforms.uReflMatrix = this.sharedUniforms.uReflMatrix;
+    uniforms.uReflActive = this.sharedUniforms.uReflActive;
+    if (!uniforms.uIsCurrentPlane) {
+      uniforms.uIsCurrentPlane = { value: 0.0 };
+    }
+    const poolRecord = {
+      mesh,
+      uniforms,
+      x: mesh.position.x,
+      y: mesh.position.y,
+      z: mesh.position.z,
+      edgeRadius,
+      maxRadius: edgeRadius * 1.35
+    };
+    this.pools.push(poolRecord);
+    return poolRecord;
+  }
+
   update(elapsed, mainCamera, forceEveryFrame = false) {
     this.sharedUniforms.uTime.value = elapsed;
-    if (!this.enabled || this.resolutionScale <= 0 || this.pools.length === 0) {
+    // Skip inverted-scene mirror rasterization when disabled OR when visibility is choked by a heavy sandstorm!
+    if (
+      !this.enabled ||
+      this.resolutionScale <= 0 ||
+      this.pools.length === 0 ||
+      this.sharedUniforms.uWeatherClarity.value < 0.42
+    ) {
       this.sharedUniforms.uReflActive.value = 0;
       return;
     }
@@ -276,16 +328,30 @@ export class PlanarReflectionSystem {
     mainCamera.updateMatrixWorld();
     this._camWorldPos.setFromMatrixPosition(mainCamera.matrixWorld);
 
-    // Pick closest visible brine pool within 58m of camera
+    this._viewProjection.multiplyMatrices(mainCamera.projectionMatrix, mainCamera.matrixWorldInverse);
+    this._mainFrustum.setFromProjectionMatrix(this._viewProjection);
+
+    // Pick closest visible water/brine surface on the SAME altitude plane (|pool.y - cam.y| <= 150m)
+    // by distance to shoreline edge (< 56m). Desert pools (Y=0) are never rasterized on Homeworld (Y=420)
+    // and the Homeworld pond (Y=420) is only rasterized while on Homeworld!
     let bestPool = null;
-    let bestDistSq = 58 * 58;
+    let bestEdgeDist = 56.0;
     for (const p of this.pools) {
-      if (!p.mesh.visible) continue;
-      const dx = p.x - this._camWorldPos.x;
-      const dz = p.z - this._camWorldPos.z;
-      const dSq = dx * dx + dz * dz;
-      if (dSq < bestDistSq) {
-        bestDistSq = dSq;
+      let ancestor = p.mesh;
+      while (ancestor && ancestor.visible) ancestor = ancestor.parent;
+      if (ancestor) continue;
+      p.mesh.updateWorldMatrix(true, false);
+      this._poolWorldPos.setFromMatrixPosition(p.mesh.matrixWorld);
+      if (Math.abs(this._poolWorldPos.y - this._camWorldPos.y) > 150) continue;
+      // Test the entire transformed surface, not just its center: a large salt
+      // pan or valley pond can fill the viewport while its origin is beyond the screen edge.
+      this._poolWorldBounds.copy(p.mesh.geometry.boundingSphere).applyMatrix4(p.mesh.matrixWorld);
+      if (!this._mainFrustum.intersectsSphere(this._poolWorldBounds)) continue;
+      const distCenter = Math.hypot(this._poolWorldPos.x - this._camWorldPos.x, this._poolWorldPos.z - this._camWorldPos.z);
+      const edgeRadius = (p.edgeRadius || 4.0) * p.mesh.matrixWorld.getMaxScaleOnAxis();
+      const edgeDist = Math.max(0, distCenter - edgeRadius);
+      if (edgeDist < bestEdgeDist) {
+        bestEdgeDist = edgeDist;
         bestPool = p;
       }
     }
@@ -294,7 +360,8 @@ export class PlanarReflectionSystem {
       p.uniforms.uIsCurrentPlane.value = p === bestPool ? 1.0 : 0.0;
     }
 
-    if (!bestPool || this._camWorldPos.y <= bestPool.y + 0.08) {
+    if (!bestPool || this._camWorldPos.y <= bestPool.mesh.matrixWorld.elements[13] + 0.08) {
+      this.activePool = null;
       this.sharedUniforms.uReflActive.value = 0;
       return;
     }
@@ -306,15 +373,15 @@ export class PlanarReflectionSystem {
     }
     this.activePool = bestPool;
 
-    // Resize reflection renderTarget proportionally to drawingBuffer
+    // Resize reflection renderTarget proportionally to drawingBuffer (capped at 1280x720 to bound fillrate on 4K/Ultra!)
     const drawSize = this.renderer.getDrawingBufferSize(this._drawSize);
-    const targetW = Math.max(128, Math.round((drawSize.x * this.resolutionScale) / 16) * 16);
-    const targetH = Math.max(64, Math.round((drawSize.y * this.resolutionScale) / 16) * 16);
+    const targetW = Math.min(1280, Math.max(128, Math.round((drawSize.x * this.resolutionScale) / 16) * 16));
+    const targetH = Math.min(720, Math.max(64, Math.round((drawSize.y * this.resolutionScale) / 16) * 16));
     if (this.renderTarget.width !== targetW || this.renderTarget.height !== targetH) {
       this.renderTarget.setSize(targetW, targetH);
     }
 
-    const planeY = bestPool.y;
+    const planeY = bestPool.mesh.matrixWorld.elements[13];
     const vCam = this.virtualCamera;
 
     // Mirror camera across y = planeY

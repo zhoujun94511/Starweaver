@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { ELEVATED_PLATFORMS } from '../data/gameData.js';
 import { clamp, damp, getTerrainHeight } from '../utils/math.js';
+import { getHomeworldGroundHeight } from '../data/homeworldData.js';
+import { cameraCylinderEntry } from '../utils/cameraOcclusion.js';
+import { isHomeworldContext, isHomeworldCollider } from './worldLifecycle.js';
 
 export class CameraController {
   constructor(camera, domElement, state) {
@@ -11,7 +14,8 @@ export class CameraController {
     // Cinematic third-person horizon-framing camera angle
     this.yaw = 0.44;
     this.pitch = 0.27;
-    this.distance = 11.2;
+    this.distance = 11.4;
+    this.targetDistance = 11.4;
 
     this.currentLookAt = new THREE.Vector3(4.8, 1.65, 5.8);
     this.currentPos = new THREE.Vector3(9.5, 4.8, 15.6);
@@ -21,6 +25,9 @@ export class CameraController {
     this._posePos = new THREE.Vector3();
     this._poseLook = new THREE.Vector3();
     this._safePosScratch = new THREE.Vector3();
+    this._prevTargetPos = new THREE.Vector3();
+    this._hasPrevTarget = false;
+    this._dynamicDistBonus = 0;
 
     this.showcase = null;
     this.stationFocus = null;
@@ -85,7 +92,7 @@ export class CameraController {
         const dist = this._computePinchDistance();
         if (this._pinchPrevDist > 0 && dist > 0) {
           const delta = dist - this._pinchPrevDist;
-          this.distance = clamp(this.distance - delta * 0.042, 7.5, 21.0);
+          this.targetDistance = clamp(this.targetDistance - delta * 0.042, 8.0, 21.0);
         }
         this._pinchPrevDist = dist;
       }
@@ -106,7 +113,7 @@ export class CameraController {
       'wheel',
       (e) => {
         e.preventDefault();
-        this.distance = clamp(this.distance + e.deltaY * 0.01, 7.5, 21.0);
+        this.targetDistance = clamp(this.targetDistance + e.deltaY * 0.01, 8.0, 21.0);
       },
       { passive: false }
     );
@@ -188,56 +195,45 @@ export class CameraController {
    * sandstone archways, outpost dome, and Starweaver fuselage & wings so the camera NEVER clips inside solid geometry!
    */
   _solveSpringArmFraction(lx, ly, lz, dx, dy, dz) {
-    const vx = dx - lx;
-    const vz = dz - lz;
-    const vy = dy - ly;
-    const a = vx * vx + vz * vz;
-    if (a < 1e-4) return 1.0;
-
     let minFrac = 1.0;
     const camMargin = 0.52;
 
     const testCylinder = (cx, cz, radius, topY, bottomY) => {
-      const r = radius + camMargin;
-      const ox = lx - cx;
-      const oz = lz - cz;
-      const c = ox * ox + oz * oz - r * r;
-      const b = 2.0 * (ox * vx + oz * vz);
-      const disc = b * b - 4.0 * a * c;
-      if (disc <= 0) return;
-
-      const sqrtD = Math.sqrt(disc);
-      const inv2a = 0.5 / a;
-      const tEnter = (-b - sqrtD) * inv2a;
-      const tExit = (-b + sqrtD) * inv2a;
-
-      if (tExit <= 0.04 || tEnter >= minFrac) return;
-
-      if (tEnter > 0.0) {
-        const hitY = ly + vy * tEnter;
-        const belowTop = topY === undefined || hitY < topY + 0.35;
-        const aboveBottom = bottomY === undefined || hitY > bottomY - 0.25;
-        if (belowTop && aboveBottom) {
-          minFrac = Math.min(minFrac, Math.max(0.2, tEnter - 0.025));
-        }
-      }
+      const entry = cameraCylinderEntry(lx, ly, lz, dx, dy, dz, cx, cz, radius,
+        bottomY === undefined ? -Infinity : bottomY - 0.25,
+        topY === undefined ? Infinity : topY + 0.35, camMargin);
+      if (entry > 0.0001 && entry < minFrac) minFrac = Math.max(0.12, entry - 0.025);
     };
 
-    // 1. Check against all 5 Elevated Sky-Spire / Basalt Columns
-    for (const plat of ELEVATED_PLATFORMS) {
-      if (ly < plat.topY + 0.25 || dy < plat.topY + 0.25) {
-        testCylinder(plat.x, plat.z, plat.radius * 1.18, plat.topY, undefined);
+    // 1. Check against Elevated Sky-Spire / Basalt Columns (desert plane only!)
+    const inHomeworld = isHomeworldContext(this.state, ly);
+    if (!inHomeworld) {
+      for (const plat of ELEVATED_PLATFORMS) {
+        if (ly < plat.topY + 0.25 || dy < plat.topY + 0.25) {
+          testCylinder(plat.x, plat.z, plat.radius * 1.18, plat.topY, undefined);
+        }
       }
     }
 
-    // 2. Check against Canyon Cliffs, Arch Piers, Spacecraft Fuselage & Wings, Outpost Dome & Giant Boulders
+    // 2. Check against active plane occluders (skip desert occluders on Homeworld and vice-versa!)
     for (let i = 0; i < this.occluders.length; i++) {
       const col = this.occluders[i];
+      const isHwCol = isHomeworldCollider(col);
+      if (isHwCol !== inHomeworld) continue;
       if (col.activeFn && !col.activeFn()) continue;
       testCylinder(col.x, col.z, col.radius, col.maxY, col.occluderMinY);
+      const canopy = col.cameraCanopy;
+      if (canopy) testCylinder(canopy.x, canopy.z, canopy.radius, canopy.maxY, canopy.minY);
     }
 
     return minFrac;
+  }
+
+  _getCameraGroundY(x, z, refY) {
+    if (isHomeworldContext(this.state, refY)) {
+      return getHomeworldGroundHeight(x, z);
+    }
+    return getTerrainHeight(x, z, this.state.isBridgeExtended());
   }
 
   _constrainCameraSegment(lx, ly, lz, dx, dy, dz, outVec) {
@@ -246,7 +242,7 @@ export class CameraController {
     const sx = lx + (dx - lx) * frac;
     const sz = lz + (dz - lz) * frac;
     let sy = ly + (liftedY - ly) * frac;
-    const gY = getTerrainHeight(sx, sz, this.state.isBridgeExtended());
+    const gY = this._getCameraGroundY(sx, sz, ly);
     if (gY > -2.5) {
       sy = Math.max(sy, gY + 1.45);
     }
@@ -257,16 +253,15 @@ export class CameraController {
    * Ensures the entire sightline clears rolling dune crests & crater rims (not just the endpoint!).
    */
   _enforceTerrainSightlineClearance(lx, ly, lz, dx, dy, dz) {
-    const bridgeOpen = this.state.isBridgeExtended();
     let liftedY = dy;
-    const steps = [0.4, 0.7, 1.0];
+    const steps = [0.25, 0.45, 0.65, 0.85, 1.0];
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       const sx = lx + (dx - lx) * s;
       const sz = lz + (dz - lz) * s;
-      const gY = getTerrainHeight(sx, sz, bridgeOpen);
+      const gY = this._getCameraGroundY(sx, sz, ly);
       if (gY > -2.5) {
-        const clearance = s === 1.0 ? 1.82 : 1.15;
+        const clearance = s === 1.0 ? 1.82 : 0.95 + s * 0.45;
         const minLineY = gY + clearance;
         const curLineY = ly + (liftedY - ly) * s;
         if (curLineY < minLineY) {
@@ -277,8 +272,21 @@ export class CameraController {
     return liftedY;
   }
 
+  _enforceHomeworldCurrentSightline() {
+    if (!isHomeworldContext(this.state, this.currentLookAt.y)) return;
+    this._constrainCameraSegment(this.currentLookAt.x, this.currentLookAt.y, this.currentLookAt.z,
+      this.currentPos.x, this.currentPos.y, this.currentPos.z, this._safePosScratch);
+    this.currentPos.copy(this._safePosScratch);
+  }
+
+  _getLookHeightOffset(dist) {
+    const t = clamp((dist - 8.0) / 13.0, 0, 1);
+    return 1.32 + t * 0.48;
+  }
+
   getDesiredFollowPose(targetPos) {
-    this._poseLook.set(targetPos.x, targetPos.y + 1.58, targetPos.z);
+    const lookH = this._getLookHeightOffset(this.distance);
+    this._poseLook.set(targetPos.x, targetPos.y + lookH, targetPos.z);
     const horizDist = Math.cos(this.pitch) * this.distance;
     const vertDist = Math.sin(this.pitch) * this.distance;
     const fullX = this._poseLook.x + Math.sin(this.yaw) * horizDist;
@@ -317,6 +325,7 @@ export class CameraController {
     this._occlusionFrac = 1.0;
     this.currentPos.copy(pose.position);
     this.currentLookAt.copy(pose.lookAt);
+    this._enforceHomeworldCurrentSightline();
     this.camera.position.copy(this.currentPos);
     this.camera.lookAt(this.currentLookAt);
   }
@@ -325,7 +334,8 @@ export class CameraController {
     if (overridePose) {
       this.currentPos.copy(overridePose.position);
       this.currentLookAt.copy(overridePose.lookAt);
-      this.camera.position.copy(overridePose.position);
+      this._enforceHomeworldCurrentSightline();
+      this.camera.position.copy(this.currentPos);
       this.camera.lookAt(overridePose.lookAt);
       return;
     }
@@ -342,6 +352,7 @@ export class CameraController {
         this._safePosScratch
       );
       this.currentPos.lerp(safeTarget, Math.min(1, dt * 6.0));
+      this._enforceHomeworldCurrentSightline();
       this.camera.position.copy(this.currentPos);
       this.camera.lookAt(this.currentLookAt);
       return;
@@ -360,6 +371,7 @@ export class CameraController {
         this._safePosScratch
       );
       this.currentPos.lerp(safeTarget, Math.min(1, dt * 4.5));
+      this._enforceHomeworldCurrentSightline();
       this.camera.position.copy(this.currentPos);
       this.camera.lookAt(this.currentLookAt);
       if (this.showcase.timer <= 0) {
@@ -368,7 +380,31 @@ export class CameraController {
       return;
     }
 
-    this._desiredLook.set(targetPos.x, targetPos.y + 1.58, targetPos.z);
+    if (this.targetDistance === undefined) this.targetDistance = this.distance;
+    if (this._dynamicDistBonus === undefined) this._dynamicDistBonus = 0;
+
+    let speedHoriz = 0;
+    let speedVert = 0;
+    if (this._hasPrevTarget && dt > 1e-4) {
+      const invDt = 1.0 / dt;
+      speedHoriz = Math.hypot(
+        targetPos.x - this._prevTargetX,
+        targetPos.z - this._prevTargetZ
+      ) * invDt;
+      speedVert = Math.abs(targetPos.y - this._prevTargetY) * invDt;
+    }
+    this._prevTargetX = targetPos.x;
+    this._prevTargetY = targetPos.y;
+    this._prevTargetZ = targetPos.z;
+    this._hasPrevTarget = true;
+
+    // Smoothly expand arm during jetpack flight or brisk travel, then settle back naturally
+    const desiredBonus = clamp((speedHoriz - 3.6) * 0.28, 0, 1.4) + clamp((speedVert - 1.2) * 0.35, 0, 1.0);
+    this._dynamicDistBonus = damp(this._dynamicDistBonus, desiredBonus, 3.2, dt);
+    this.distance = damp(this.distance, this.targetDistance + this._dynamicDistBonus, 10.5, dt);
+
+    const lookH = this._getLookHeightOffset(this.distance);
+    this._desiredLook.set(targetPos.x, targetPos.y + lookH, targetPos.z);
     this.currentLookAt.x = damp(this.currentLookAt.x, this._desiredLook.x, 10, dt);
     this.currentLookAt.y = damp(this.currentLookAt.y, this._desiredLook.y, 10, dt);
     this.currentLookAt.z = damp(this.currentLookAt.z, this._desiredLook.z, 10, dt);
@@ -398,27 +434,28 @@ export class CameraController {
       fullZ
     );
 
-    // Asymmetric spring-arm response: snap forward fast when occluded, ease back smoothly when clear!
-    const fracRate = targetFrac < this._occlusionFrac ? 26.0 : 6.5;
+    // Asymmetric spring-arm response: pull in smoothly when occluded, ease back gently when clear
+    const fracRate = targetFrac < this._occlusionFrac ? 18.0 : 5.5;
     this._occlusionFrac = damp(this._occlusionFrac, targetFrac, fracRate, dt);
 
     const desiredX = this.currentLookAt.x + (fullX - this.currentLookAt.x) * this._occlusionFrac;
     const desiredZ = this.currentLookAt.z + (fullZ - this.currentLookAt.z) * this._occlusionFrac;
     let desiredY = this.currentLookAt.y + (fullY - this.currentLookAt.y) * this._occlusionFrac;
 
-    const groundAtCam = getTerrainHeight(
+    const groundAtCam = this._getCameraGroundY(
       desiredX,
       desiredZ,
-      this.state.isBridgeExtended()
+      this.currentLookAt.y
     );
     if (groundAtCam > -2.5) {
       desiredY = Math.max(desiredY, groundAtCam + 1.45);
     }
 
-    const posRate = targetFrac < 0.98 ? 18 : 9;
+    const posRate = targetFrac < 0.98 ? 14 : 9.5;
     this.currentPos.x = damp(this.currentPos.x, desiredX, posRate, dt);
     this.currentPos.y = damp(this.currentPos.y, desiredY, posRate, dt);
     this.currentPos.z = damp(this.currentPos.z, desiredZ, posRate, dt);
+    this._enforceHomeworldCurrentSightline();
 
     this.camera.position.copy(this.currentPos);
     this.camera.lookAt(this.currentLookAt);

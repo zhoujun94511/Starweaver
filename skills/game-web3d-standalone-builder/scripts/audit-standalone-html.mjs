@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Automated Offline Purity & Size Gate for Standalone Web 3D HTML Deliverables.
-// Usage: node audit-standalone-html.mjs [path-to-standalone.html] [maxSizeMB=5]
+// Usage: node audit-standalone-html.mjs [path-to-standalone.html] [maxSizeMB=1.5]
 // With no path, audits the newest dist/starweaver-<version>-<YYYYMMDD-HHmmss>.html.
 
 import fs from 'node:fs';
@@ -10,7 +10,7 @@ import { findLatestArtifact } from '../../../starweaver/scripts/dist-artifact.mj
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const targetArg = process.argv[2];
-const maxMb = Number(process.argv[3] || (targetArg && /^\d+(\.\d+)?$/.test(targetArg) ? targetArg : 5.0));
+const maxMb = Number(process.argv[3] || (targetArg && /^\d+(\.\d+)?$/.test(targetArg) ? targetArg : 1.5));
 const explicitPath = targetArg && !/^\d+(\.\d+)?$/.test(targetArg) ? targetArg : null;
 const htmlPath = explicitPath
   ? path.resolve(process.cwd(), explicitPath)
@@ -27,14 +27,24 @@ const html = fs.readFileSync(htmlPath, 'utf8');
 
 const violations = [];
 
+if (!/<html\s+lang=["']en["']\s*>/i.test(html)) {
+  violations.push('Root <html lang="en"> tag is missing or malformed');
+}
+
 if (sizeMb > maxMb) {
   violations.push(`Size ${sizeMb.toFixed(3)} MB exceeds target budget ${maxMb} MB`);
 }
 if (/<script\b[^>]*\bsrc\s*=/i.test(html)) {
   violations.push('Contains external <script src="..."> tag');
 }
-if (/<link\b[^>]*\bhref\s*=/i.test(html)) {
-  violations.push('Contains external <link href="..."> tag');
+for (const tag of html.match(/<link\b[^>]*>/gi) || []) {
+  const hm = tag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+  if (hm) {
+    const val = (hm[1] ?? hm[2] ?? hm[3] ?? '').trim();
+    if (!val.startsWith('data:image/')) {
+      violations.push(`Contains external <link href="${val.slice(0, 60)}"> tag`);
+    }
+  }
 }
 if (/@import\s+(url\(|["'])/i.test(html)) {
   violations.push('Contains CSS @import rule');

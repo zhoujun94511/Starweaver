@@ -1,14 +1,18 @@
 import {
   CREW_LOGS,
   ELEVATED_PLATFORMS,
+  EQUIPMENT_DEFS,
   LEVELS,
   MATERIALS,
   PREFLIGHT_CHECKS,
   RECIPES,
   REPAIR_TARGETS,
   RESOURCE_NODES,
-  WORLD_FACILITIES
+  STATION_TYPES,
+  WORLD_FACILITIES,
+  WORLD_MECHANISMS
 } from '../data/gameData.js';
+import { formatTemplate } from '../data/i18n.js';
 import { dist2D } from '../utils/math.js';
 
 /**
@@ -24,12 +28,17 @@ export class GuidanceSystem {
     this._cachedWaypoint = null;
   }
 
+  invalidateCache() {
+    this._cacheKey = '';
+    this._cachedWaypoint = null;
+  }
+
   resolveActiveWaypoint(robotPos) {
     const rx = robotPos.x;
     const rz = robotPos.z;
     const cellX = Math.round(rx * 0.5);
     const cellZ = Math.round(rz * 0.5);
-    const key = `${this.state.versionTick}|${cellX}|${cellZ}`;
+    const key = `${this.state.activeWorldPlane || 'desert'}|${this.state.versionTick}|${cellX}|${cellZ}`;
 
     if (key === this._cacheKey) {
       if (this._cachedWaypoint) {
@@ -53,11 +62,11 @@ export class GuidanceSystem {
     }
 
     const lvl = this.state.currentLevel;
-    const lvlDef = LEVELS[Math.max(0, Math.min(4, lvl - 1))];
+    const lvlDef = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, lvl - 1))];
     const zh = this.state.lang === 'zh';
 
-    // 1. Level 5 Post-Propulsion: Pre-Flight Hull Checks -> Boarding Ramp!
-    if (this.state.repairs.repair_propulsion) {
+    // 1. All Ship Core Systems Repaired -> Pre-Flight Hull Checks -> Boarding Ramp!
+    if (this.state.areAllShipSystemsRepaired()) {
       for (const chk of PREFLIGHT_CHECKS) {
         if (!this.state.preflightDone[chk.id]) {
           return this._pack(
@@ -85,69 +94,68 @@ export class GuidanceSystem {
       );
     }
 
-    // 2. Level 3+ Prerequisite Upgrade: Spiral Geo-Drill!
-    if (lvl >= 3 && !this.state.hasEquipment('drill')) {
-      if (this.state.getQueuedCountForOutput('geo_drill') > 0) {
-        const st = this._pickNearestStation(rx, rz, 'fabricator');
-        return this._pack(
-          rx,
-          rz,
-          st.x,
-          st.z,
-          '#ffb03a',
-          'wait_queue',
-          zh ? '正在组装【螺旋地质钻头与脉冲声呐】，请稍候...' : 'Assembling Spiral Geo-Drill — standby...'
-        );
-      }
-      const drillStep = this._findActionForItem('geo_drill', 1, rx, rz);
-      if (drillStep) return drillStep;
-    }
-
-    // 3. Level 4+ Prerequisite Upgrade: Micro-Gravity Thruster Wings (Jetpack)!
-    if (lvl >= 4 && !this.state.hasEquipment('jetpack')) {
-      if (this.state.getQueuedCountForOutput('jetpack_wing') > 0) {
-        const st = this._pickNearestStation(rx, rz, 'fabricator');
-        return this._pack(
-          rx,
-          rz,
-          st.x,
-          st.z,
-          '#5ef2ff',
-          'wait_queue',
-          zh ? '正在组装【微重力喷气飞行翼】，请稍候...' : 'Assembling Micro-Gravity Thruster Wings — standby...'
-        );
-      }
-      const jetpackStep = this._findActionForItem('jetpack_wing', 1, rx, rz);
-      if (jetpackStep) return jetpackStep;
-    }
-
-    // 4. Level 4 Gorge Bridge Gate: Align both Solar Mirror Pylons (South Pylon is atop Sky-Spire!)
-    if (lvl === 4 && !this.state.isBridgeExtended()) {
-      const nextPylon = WORLD_FACILITIES.pylons.find(
-        (p) => !this.state.pylonsAligned[p.id]
-      );
-      if (nextPylon) {
-        const label = nextPylon.elevated
-          ? zh
-            ? `按住 [Space] 喷气飞上南侧孤峰校准【太阳能反射塔】(${this.state.getAlignedPylonCount()}/2)`
-            : `Hold [Space] to fly atop South Spire & Align Solar Pylon (${this.state.getAlignedPylonCount()}/2)`
-          : zh
-            ? `向西前往峡谷校准【太阳能反射塔】(${this.state.getAlignedPylonCount()}/2) 架通光桥`
-            : `Head West & Align Solar Mirror Pylon (${this.state.getAlignedPylonCount()}/2)`;
-        return this._pack(
-          rx,
-          rz,
-          nextPylon.x,
-          nextPylon.z,
-          '#ffd666',
-          'pylon',
-          label,
-          nextPylon.platformId || null
-        );
+    // 2. Declarative Mandatory Equipment Prerequisites (sorted by unlockLevel from EQUIPMENT_DEFS)
+    const orderedEquip = Object.values(EQUIPMENT_DEFS).sort(
+      (a, b) => a.unlockLevel - b.unlockLevel
+    );
+    for (const eqDef of orderedEquip) {
+      if (
+        eqDef.mandatoryFromLevel &&
+        lvl >= eqDef.mandatoryFromLevel &&
+        !this.state.hasEquipment(eqDef.slot)
+      ) {
+        const eqRecipe = RECIPES.find((r) => r.output.id === eqDef.itemId);
+        const eqStationKind = eqRecipe ? eqRecipe.station : 'fabricator';
+        if (this.state.getQueuedCountForOutput(eqDef.itemId) > 0) {
+          const st = this._pickNearestStation(rx, rz, eqStationKind);
+          return this._pack(
+            rx,
+            rz,
+            st.x,
+            st.z,
+            eqDef.waypointColor || '#5ef2ff',
+            'wait_queue',
+            this.state.text(eqDef.waitText)
+          );
+        }
+        const eqStep = this._findActionForItem(eqDef.itemId, 1, rx, rz);
+        if (eqStep) return eqStep;
       }
     }
 
-    // 5. Recursive Dependency Walk for Current Level's Main Ship Module!
+    // 3. Declarative Level Prerequisite World Mechanism (e.g., aligning Solar Pylons in Relay Gorge, or future valves/prisms!)
+    if (lvlDef.prerequisiteMechanism && !this.state.isMechanismComplete(lvlDef.prerequisiteMechanism)) {
+      const mech = WORLD_MECHANISMS[lvlDef.prerequisiteMechanism];
+      if (mech && mech.kind === 'group') {
+        const prog = this.state.getMechanismProgress(mech.id);
+        const nextNode = mech.nodes.find(
+          (n) => !this.state.isMechanismNodeActive(mech.id, n.id)
+        );
+        if (nextNode) {
+          const tpl = nextNode.elevated && mech.waypointElevatedLabel
+            ? this.state.text(mech.waypointElevatedLabel)
+            : mech.waypointGroundLabel
+              ? this.state.text(mech.waypointGroundLabel)
+              : `${mech.id} (${prog.done}/${prog.total})`;
+          const label = formatTemplate(tpl, {
+            done: prog.done,
+            total: prog.total
+          });
+          return this._pack(
+            rx,
+            rz,
+            nextNode.x,
+            nextNode.z,
+            mech.waypointColor || '#ffd666',
+            mech.interactKind || 'mechanism',
+            label,
+            nextNode.platformId || null
+          );
+        }
+      }
+    }
+
+    // 4. Recursive Dependency Walk for Current Level's Main Ship Module!
     const targetId = lvlDef.repairTargetId;
     const mainCompId = lvlDef.requiredComponentId;
 
@@ -167,13 +175,16 @@ export class GuidanceSystem {
     }
 
     if (this.state.getQueuedCountForOutput(mainCompId) >= 1) {
-      const st = this._pickNearestStation(rx, rz, 'fabricator');
+      const mainRec = RECIPES.find((r) => r.output.id === mainCompId);
+      const mainStationKind = mainRec ? mainRec.station : 'fabricator';
+      const st = this._pickNearestStation(rx, rz, mainStationKind);
+      const stMeta = STATION_TYPES[mainStationKind] || STATION_TYPES.fabricator;
       return this._pack(
         rx,
         rz,
         st.x,
         st.z,
-        '#5ce8ff',
+        stMeta.waitColor,
         'wait_queue',
         zh ? '正在精密制造台加工主线核心组件，请稍候...' : 'Fabricating main ship module — standby...'
       );
@@ -270,39 +281,30 @@ export class GuidanceSystem {
         const inpRecipe = RECIPES.find((r) => r.output.id === inp.id);
         const waitStationType = inpRecipe ? inpRecipe.station : 'furnace';
         const waitStation = this._pickNearestStation(rx, rz, waitStationType);
-        const isFab = waitStationType === 'fabricator';
+        const stMeta = STATION_TYPES[waitStationType] || STATION_TYPES.furnace;
+        const waitTpl = this.state.text(stMeta.waitLabel);
         return this._pack(
           rx,
           rz,
           waitStation.x,
           waitStation.z,
-          isFab ? '#5ce8ff' : '#ffbe4d',
+          stMeta.waitColor,
           'wait_queue',
-          zh
-            ? isFab
-              ? `等待【${this.state.text(MATERIALS[inp.id].name)}】精密组装完成...`
-              : `等待【${this.state.text(MATERIALS[inp.id].name)}】熔炼出炉...`
-            : isFab
-              ? `Waiting for ${this.state.text(MATERIALS[inp.id].name)} to finish fabricating...`
-              : `Waiting for ${this.state.text(MATERIALS[inp.id].name)} to finish smelting...`
+          formatTemplate(waitTpl, { item: this.state.text(MATERIALS[inp.id].name) })
         );
       }
     }
 
     const station = this._pickNearestStation(rx, rz, recipe.station);
-    const stationLabel =
-      station.id === 'outpost_purifier'
-        ? this.state.text(WORLD_FACILITIES.outpost_purifier.name)
-        : recipe.station === 'furnace'
-          ? this.state.ui('btnFurnace')
-          : this.state.ui('btnFabricator');
+    const stMeta = STATION_TYPES[recipe.station] || STATION_TYPES.fabricator;
+    const stationLabel = this.state.text(station.name) || this.state.text(stMeta.name);
 
     return this._pack(
       rx,
       rz,
       station.x,
       station.z,
-      recipe.station === 'furnace' ? '#ff9d3b' : '#5ce8ff',
+      stMeta.waypointColor,
       'station',
       zh
         ? `前往【${stationLabel}】制作 ${this.state.text(mat.name)}${mat.category === 'equipment' ? '' : ` ×${deficit}`}`
@@ -345,15 +347,25 @@ export class GuidanceSystem {
   }
 
   _pickNearestStation(rx, rz, stationKind) {
-    const base =
-      stationKind === 'furnace' ? WORLD_FACILITIES.furnace : WORLD_FACILITIES.fabricator;
-    const outpost = WORLD_FACILITIES.outpost_purifier;
-    if (this.state.currentLevel >= outpost.unlockLevel) {
-      const dBase = dist2D(rx, rz, base.x, base.z);
-      const dOut = dist2D(rx, rz, outpost.x, outpost.z);
-      if (dOut < dBase) return outpost;
+    const unlockedStations = WORLD_FACILITIES.stations.filter(
+      (st) =>
+        Array.isArray(st.stationKinds) &&
+        st.stationKinds.includes(stationKind) &&
+        this.state.currentLevel >= (st.unlockLevel || 1)
+    );
+    if (unlockedStations.length === 0) {
+      return WORLD_FACILITIES.fabricator;
     }
-    return base;
+    let best = unlockedStations[0];
+    let bestDist = dist2D(rx, rz, best.x, best.z);
+    for (let i = 1; i < unlockedStations.length; i++) {
+      const d = dist2D(rx, rz, unlockedStations[i].x, unlockedStations[i].z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = unlockedStations[i];
+      }
+    }
+    return best;
   }
 
   _pickBestResourceNode(materialId, rx, rz) {
@@ -362,8 +374,7 @@ export class GuidanceSystem {
       if (!this.state.isRegionUnlocked(n.region)) return false;
       if (n.subsurface && !this.state.hasEquipment('drill')) return false;
       if (n.elevated && !this.state.hasEquipment('jetpack')) return false;
-      // Avoid pointing across the Relay Gorge chasm before the bridge is extended!
-      if (n.region === 'relay_gorge' && n.x < -50 && !this.state.isBridgeExtended()) {
+      if (n.requiresMechanism && !this.state.isMechanismComplete(n.requiresMechanism)) {
         return false;
       }
       return true;
@@ -387,7 +398,37 @@ export class GuidanceSystem {
 
   _resolveFreeRoamOptionalWaypoint(rx, rz) {
     const zh = this.state.lang === 'zh';
-    // Point to nearest unread Crew Log if any remain!
+    // 1. Guide toward Post-Game Planetary Climate Telemetry Beacons first!
+    const beaconMech = WORLD_MECHANISMS.weather_beacons;
+    if (beaconMech && !this.state.isMechanismComplete('weather_beacons')) {
+      const prog = this.state.getMechanismProgress('weather_beacons');
+      let bestBeacon = null;
+      let bestB = Infinity;
+      for (const bn of beaconMech.nodes) {
+        if (!this.state.isMechanismNodeActive('weather_beacons', bn.id)) {
+          const d = dist2D(rx, rz, bn.x, bn.z);
+          if (d < bestB) {
+            bestB = d;
+            bestBeacon = bn;
+          }
+        }
+      }
+      if (bestBeacon) {
+        return this._pack(
+          rx,
+          rz,
+          bestBeacon.x,
+          bestBeacon.z,
+          beaconMech.waypointColor || '#66ffc2',
+          'weather_beacon',
+          zh
+            ? `终局科考委托 · 部署气象遥测信标 (${prog.done}/${prog.total})`
+            : `Expedition • Deploy Climate Telemetry Beacon (${prog.done}/${prog.total})`
+        );
+      }
+    }
+
+    // 2. Point to nearest unread Crew Log if any remain!
     let bestLog = null;
     let bestDist = Infinity;
     for (const log of Object.values(CREW_LOGS)) {
@@ -410,6 +451,31 @@ export class GuidanceSystem {
         zh
           ? `自由探索 · 寻回未读日志：${this.state.text(bestLog.title)}`
           : `Free Roam • Recover Crew Log: ${this.state.text(bestLog.title)}`
+      );
+    }
+
+    // 3. Guide back to the Boarding Ramp to return to the Homeworld Emerald Valley!
+    const ramp = WORLD_FACILITIES.boarding_ramp;
+    if (ramp) {
+      const hwProg =
+        typeof this.state.getHomeworldProgress === 'function'
+          ? this.state.getHomeworldProgress()
+          : { doneSteps: 0, totalSteps: 5 };
+      const hwIncomplete = !this.state.homeworldSurvey?.completed;
+      return this._pack(
+        rx,
+        rz,
+        ramp.x,
+        ramp.z,
+        '#52ffb8',
+        'launch',
+        hwIncomplete
+          ? zh
+            ? `前往登机舷梯按 [E] 返回母星继续家园巡检 (${hwProg.doneSteps}/${hwProg.totalSteps})`
+            : `Board Starweaver Ramp [E] — Resume Homeworld Watch (${hwProg.doneSteps}/${hwProg.totalSteps})`
+          : zh
+            ? '前往登机舷梯按 [E] 随时重返翡翠母星家园'
+            : 'Board Starweaver Ramp [E] — Return to Homeworld Meadow'
       );
     }
     return null;

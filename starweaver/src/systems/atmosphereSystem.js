@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { clamp, damp, lerp, smoothstep } from '../utils/math.js';
 import { KHARIS_PLANET_DIR } from '../graphics/skyDome.js';
+import { WORLD_ATMOSPHERE_PROFILES } from './atmosphereProfiles.js';
 
 /**
  * Authoritative Planetary Day-Night Cycle & 3-State Desert Weather Orchestrator.
@@ -29,8 +30,14 @@ export class AtmosphereSystem {
     // Start at bright morning-forenoon (phase = 0.14 in [0..1])
     this.cyclePhase = INITIAL_CYCLE_PHASE;
     this.nightFactor = 0.0;
+    const initOrbitalAngle = (INITIAL_CYCLE_PHASE - 0.03) * Math.PI * 2;
+    this._sunAltitudeSin = clamp(Math.sin(initOrbitalAngle) + 0.18, -0.85, 0.96);
+    this._sunAzimuth = 0.35 + INITIAL_CYCLE_PHASE * Math.PI * 1.65;
+    this._twilightAmt = 0.0;
     this.overcastWeight = 0.0;
     this.sandstormWeight = 0.0;
+    this._resolvedTimeMode = (state.settings && state.settings.timeMode) || 'cycle';
+    this._resolvedWeatherMode = (state.settings && state.settings.weatherMode) || 'dynamic';
 
     // Dynamic weather state machine
     this.playElapsed = 0;
@@ -56,46 +63,77 @@ export class AtmosphereSystem {
 
     this._defaultDayShadowOffset = new THREE.Vector3(42, 64, 28);
     this._homeworldShadowOffset = new THREE.Vector3(38, 66, 32);
+    this._homeworldSunsetShadowOffset = new THREE.Vector3(-54, 28, 42);
     this._activeShadowOffset = new THREE.Vector3(42, 64, 28);
     this._volLightDir = new THREE.Vector3();
     this._quantizedStep = -1;
     this._usingNightEnv = false;
+    this._homeworldSunsetBlend = 0.0;
+    this._homeworldNightBlend = 0.0;
+    this._resolvedHomeworldAtmo = 'dawn';
 
-    this._cDayZenith = new THREE.Color('#183b6b');
-    this._cDuskZenith = new THREE.Color('#1d2452');
-    this._cStormZenith = new THREE.Color('#6b482e');
+    const dp = WORLD_ATMOSPHERE_PROFILES.desert;
+    const hp = WORLD_ATMOSPHERE_PROFILES.homeworld;
 
-    this._cDayMid = new THREE.Color('#4f7ea8');
-    this._cDuskMid = new THREE.Color('#8c5068');
-    this._cOvercastMid = new THREE.Color('#6c7d91');
-    this._cStormMid = new THREE.Color('#a86e44');
+    this._cDayZenith = new THREE.Color(dp.zenithDay);
+    this._cDuskZenith = new THREE.Color(dp.zenithDusk);
+    this._cStormZenith = new THREE.Color(dp.zenithStorm);
+    this._cHomeDawnZenith = new THREE.Color(hp.zenithDawn);
+    this._cHomeSunsetZenith = new THREE.Color(hp.zenithSunset);
 
-    this._cDayHorSun = new THREE.Color('#ffbe78');
-    this._cDuskHorSun = new THREE.Color('#ff6e38');
-    this._cStormHorSun = new THREE.Color('#e09358');
+    this._cDayMid = new THREE.Color(dp.midDay);
+    this._cDuskMid = new THREE.Color(dp.midDusk);
+    this._cOvercastMid = new THREE.Color(dp.overcastMid);
+    this._cStormMid = new THREE.Color(dp.stormMid);
+    this._cHomeDawnMid = new THREE.Color(hp.midDawn);
+    this._cHomeSunsetMid = new THREE.Color(hp.midSunset);
 
-    this._cDayHorAway = new THREE.Color('#6e7399');
-    this._cDuskHorAway = new THREE.Color('#3b3766');
-    this._cStormHorAway = new THREE.Color('#9c6844');
+    this._cDayHorSun = new THREE.Color(dp.horSunDay);
+    this._cDuskHorSun = new THREE.Color(dp.horSunDusk);
+    this._cStormHorSun = new THREE.Color(dp.horSunStorm);
+    this._cHomeDawnHorSun = new THREE.Color(hp.horSunDawn);
+    this._cHomeSunsetHorSun = new THREE.Color(hp.horSunSunset);
 
-    this._cSunNoon = new THREE.Color('#fff0cf');
-    this._cSunDusk = new THREE.Color('#ff8847');
-    this._cMoonCol = new THREE.Color('#8ec8ff');
-    this._cHomeSun = new THREE.Color('#fff6df');
+    this._cDayHorAway = new THREE.Color(dp.horAwayDay);
+    this._cDuskHorAway = new THREE.Color(dp.horAwayDusk);
+    this._cStormHorAway = new THREE.Color(dp.horAwayStorm);
+    this._cHomeDawnHorAway = new THREE.Color(hp.horAwayDawn);
+    this._cHomeSunsetHorAway = new THREE.Color(hp.horAwaySunset);
 
-    this._cHemiSkyDay = new THREE.Color('#bfdfff');
-    this._cHemiSkyNight = new THREE.Color('#35568c');
-    this._cHemiSkyStorm = new THREE.Color('#d49562');
-    this._cHemiSkyHome = new THREE.Color('#c8ebff');
+    this._cHomeDawnGroundHaze = new THREE.Color(hp.groundHazeDawn);
+    this._cHomeSunsetGroundHaze = new THREE.Color(hp.groundHazeSunset);
+    this._cHomeDawnCloudCool = new THREE.Color(hp.cloudCoolDawn);
+    this._cHomeSunsetCloudCool = new THREE.Color(hp.cloudCoolSunset);
+    this._cHomeDawnCloudDark = new THREE.Color(hp.cloudDarkDawn);
+    this._cHomeSunsetCloudDark = new THREE.Color(hp.cloudDarkSunset);
 
-    this._cHemiGndDay = new THREE.Color('#9e5632');
-    this._cHemiGndNight = new THREE.Color('#161e33');
-    this._cHemiGndHome = new THREE.Color('#4c7d42');
+    this._cSunNoon = new THREE.Color(dp.sunNoon);
+    this._cSunDusk = new THREE.Color(dp.sunDusk);
+    this._cMoonCol = new THREE.Color(dp.moon);
+    this._cHomeSun = new THREE.Color(hp.sunDawn);
+    this._cHomeSunsetSun = new THREE.Color(hp.sunSunset);
+    this._cHomeMoonCol = new THREE.Color(hp.moon);
 
-    this._cFogDay = new THREE.Color('#d89c72');
-    this._cFogDusk = new THREE.Color('#965258');
-    this._cFogNight = new THREE.Color('#0c1730');
-    this._cFogStorm = new THREE.Color('#c9824b');
+    this._cHemiSkyDay = new THREE.Color(dp.hemiSkyDay);
+    this._cHemiSkyNight = new THREE.Color(dp.hemiSkyNight);
+    this._cHemiSkyStorm = new THREE.Color(dp.hemiSkyStorm);
+    this._cHemiSkyHome = new THREE.Color(hp.hemiSkyDawn);
+    this._cHemiSkyHomeSunset = new THREE.Color(hp.hemiSkySunset);
+    this._cHemiSkyHomeNight = new THREE.Color(hp.hemiSkyNight);
+
+    this._cHemiGndDay = new THREE.Color(dp.hemiGndDay);
+    this._cHemiGndNight = new THREE.Color(dp.hemiGndNight);
+    this._cHemiGndHome = new THREE.Color(hp.hemiGndDawn);
+    this._cHemiGndHomeSunset = new THREE.Color(hp.hemiGndSunset);
+    this._cHemiGndHomeNight = new THREE.Color(hp.hemiGndNight);
+
+    this._cFogDay = new THREE.Color(dp.fogDay);
+    this._cFogDusk = new THREE.Color(dp.fogDusk);
+    this._cFogNight = new THREE.Color(dp.fogNight);
+    this._cFogStorm = new THREE.Color(dp.fogStorm);
+    this._cFogHomeDawn = new THREE.Color(hp.fogDawn);
+    this._cFogHomeSunset = new THREE.Color(hp.fogSunset);
+    this._cFogHomeNight = new THREE.Color(hp.fogNight);
 
     this._tmpColA = new THREE.Color();
     this._tmpColB = new THREE.Color();
@@ -119,6 +157,9 @@ export class AtmosphereSystem {
     this._quantizedStep = -1;
     this._usingNightEnv = false;
     this._syncStateClock();
+    if (this.state && typeof this.state.setSolarEnv === 'function') {
+      this.state.setSolarEnv(0, 0, 0);
+    }
   }
 
   /**
@@ -157,6 +198,9 @@ export class AtmosphereSystem {
     }
 
     if (mode === 'intro') {
+      if (this.postProcessing) {
+        this.postProcessing.planeBaseY = WORLD_ATMOSPHERE_PROFILES.desert.planeBaseY;
+      }
       this.nightFactor = 0.0;
       this.overcastWeight = 0.0;
       this.sandstormWeight = 0.0;
@@ -190,6 +234,11 @@ export class AtmosphereSystem {
     if (mode === 'launch') {
       const isHomeworld = progress >= 0.58;
       this._quantizedStep = isHomeworld ? -903 : -902;
+      if (this.postProcessing) {
+        this.postProcessing.planeBaseY = isHomeworld
+          ? WORLD_ATMOSPHERE_PROFILES.homeworld.planeBaseY
+          : WORLD_ATMOSPHERE_PROFILES.desert.planeBaseY;
+      }
 
       if (!isHomeworld) {
         // Act 1 & Act 2: Radiant desert liftoff & orbital climb
@@ -230,7 +279,7 @@ export class AtmosphereSystem {
           this.world.hemiLight.groundColor.copy(this._cHemiGndHome);
           this.world.hemiLight.intensity = 0.68;
         }
-        this._applyCutscenePostAndWater(this._homeworldShadowOffset, this._cHomeSun, 0.0016, 0.16);
+        this._applyCutscenePostAndWater(this._homeworldShadowOffset, this._cHomeSun, 0.00065, 0.14);
       }
     }
   }
@@ -251,12 +300,203 @@ export class AtmosphereSystem {
     if (this.world && this.world.planarReflection) {
       this.world.planarReflection.sharedUniforms.uSunDir.value.copy(this._volLightDir);
       this.world.planarReflection.sharedUniforms.uNightFactor.value = 0.0;
+      this.world.planarReflection.sharedUniforms.uWeatherClarity.value = 1.0;
+    }
+  }
+
+  /**
+   * Drives the Emerald Valley Homeworld atmosphere across 3 curated modes:
+   * - 'dawn': Radiant golden-azure morning (default baseline contrasting desert storms)
+   * - 'sunset': Golden-crimson twilight over the alpine peaks & mirror pond (unlocked at 100% Watch + 3+ Climate Beacons)
+   * - 'night': Starry Milky Way & colossal ringed planet night sky with glowing monument star-crest & valley lanterns
+   */
+  updateHomeworld(dt, elapsed, camera, isPaused = false) {
+    const mode =
+      this.state && typeof this.state.getHomeworldAtmosphere === 'function'
+        ? this.state.getHomeworldAtmosphere()
+        : 'dawn';
+    const modeChanged = mode !== this._resolvedHomeworldAtmo;
+    this._resolvedHomeworldAtmo = mode;
+    if (isPaused && modeChanged) {
+      this.postProcessing?.resetExposure?.();
+    }
+
+    const targetSunset = mode === 'sunset' ? 1.0 : 0.0;
+    const targetNight = mode === 'night' ? 1.0 : 0.0;
+    const snapPaused = isPaused && modeChanged;
+
+    this._homeworldSunsetBlend = snapPaused
+      ? targetSunset
+      : damp(this._homeworldSunsetBlend, targetSunset, 3.2, dt);
+    this._homeworldNightBlend = snapPaused
+      ? targetNight
+      : damp(this._homeworldNightBlend, targetNight, 3.2, dt);
+
+    const sBlend = clamp(this._homeworldSunsetBlend, 0, 1);
+    const nBlend = clamp(this._homeworldNightBlend, 0, 1);
+    const skyNightK = clamp(nBlend + sBlend * 0.22, 0, 1);
+
+    this.nightFactor = skyNightK;
+    this.overcastWeight = 0.0;
+    this.sandstormWeight = 0.0;
+
+    // 1. Celestial Sun / Planet Shadow Offset & Direction
+    this._activeShadowOffset
+      .copy(this._homeworldShadowOffset)
+      .lerp(this._homeworldSunsetShadowOffset, sBlend)
+      .lerp(this._planetMoonOffset, nBlend);
+    this._sunDir.copy(this._activeShadowOffset).normalize();
+
+    const stepCode = mode === 'night' ? -912 : mode === 'sunset' ? -911 : -910;
+    if (this._quantizedStep !== stepCode || sBlend > 0.01 || nBlend > 0.01) {
+      this._quantizedStep = stepCode;
+      this._syncWorldShadowOffset(this._activeShadowOffset);
+    }
+
+    // 2. SkyDome Uniforms
+    if (this.world && this.world.skyDome) {
+      const skyU = this.world.skyDome.uniforms;
+      skyU.uIsHomeworld.value = 1.0;
+      skyU.uSpaceBlend.value = 0.0;
+      skyU.uDustVeil.value = 0.0;
+      skyU.uNightFactor.value = skyNightK;
+      skyU.uCloudCoverage.value = lerp(0.42, 0.48, sBlend) * (1.0 - nBlend * 0.45);
+      skyU.uSunDir.value.copy(this._sunDir);
+      skyU.uPlanetDir.value.copy(this._planetDir);
+
+      skyU.uZenithColor.value
+        .copy(this._cHomeDawnZenith)
+        .lerp(this._cHomeSunsetZenith, sBlend);
+      skyU.uMidSkyColor.value
+        .copy(this._cHomeDawnMid)
+        .lerp(this._cHomeSunsetMid, sBlend);
+      skyU.uHorizonColor.value
+        .copy(this._cHomeDawnHorSun)
+        .lerp(this._cHomeSunsetHorSun, sBlend);
+      skyU.uHorizonAway.value
+        .copy(this._cHomeDawnHorAway)
+        .lerp(this._cHomeSunsetHorAway, sBlend);
+      skyU.uGroundHaze.value
+        .copy(this._cHomeDawnGroundHaze)
+        .lerp(this._cHomeSunsetGroundHaze, sBlend);
+      skyU.uSunColor.value
+        .copy(this._cHomeSun)
+        .lerp(this._cHomeSunsetSun, sBlend)
+        .lerp(this._cHomeMoonCol, nBlend);
+      skyU.uCloudCool.value
+        .copy(this._cHomeDawnCloudCool)
+        .lerp(this._cHomeSunsetCloudCool, sBlend);
+      skyU.uCloudDark.value
+        .copy(this._cHomeDawnCloudDark)
+        .lerp(this._cHomeSunsetCloudDark, sBlend);
+    }
+
+    // 3. Static PMREM Environment Probe Handoff
+    const wantNightEnv = nBlend >= 0.55;
+    if (this.environments) {
+      if (wantNightEnv && this.environments.desertNight) {
+        if (this.scene.environment !== this.environments.desertNight) {
+          this.scene.environment = this.environments.desertNight;
+        }
+        this._usingNightEnv = true;
+      } else if (this.environments.homeworld) {
+        if (this.scene.environment !== this.environments.homeworld) {
+          this.scene.environment = this.environments.homeworld;
+        }
+        this._usingNightEnv = false;
+      }
+    }
+    this.scene.environmentIntensity = lerp(lerp(1.0, 0.92, sBlend), 0.78, nBlend);
+
+    // 4. Directional Sun / Moonlight & Hemisphere Fill
+    if (this.world) {
+      this._tmpColA
+        .copy(this._cHomeSun)
+        .lerp(this._cHomeSunsetSun, sBlend)
+        .lerp(this._cHomeMoonCol, nBlend);
+      this.world.sunLight.color.copy(this._tmpColA);
+      this.world.sunLight.intensity = lerp(lerp(2.68, 2.38, sBlend), 1.48, nBlend);
+
+      this.world.hemiLight.color
+        .copy(this._cHemiSkyHome)
+        .lerp(this._cHemiSkyHomeSunset, sBlend)
+        .lerp(this._cHemiSkyHomeNight, nBlend);
+      this.world.hemiLight.groundColor
+        .copy(this._cHemiGndHome)
+        .lerp(this._cHemiGndHomeSunset, sBlend)
+        .lerp(this._cHemiGndHomeNight, nBlend);
+      this.world.hemiLight.intensity = lerp(lerp(0.68, 0.62, sBlend), 0.44, nBlend);
+    }
+
+    // 5. Exponential Distance Fog
+    if (this.scene && this.scene.fog) {
+      this._tmpColB
+        .copy(this._cFogHomeDawn)
+        .lerp(this._cFogHomeSunset, sBlend)
+        .lerp(this._cFogHomeNight, nBlend);
+      this.scene.fog.color.copy(this._tmpColB);
+      if (this.scene.background) {
+        this.scene.background.copy(this._tmpColB);
+      }
+      this.scene.fog.density = lerp(lerp(0.00055, 0.00068, sBlend), 0.00062, nBlend);
+    }
+
+    // 6. Post-Processing Volumetric God-Rays, Flare, Bloom & Planar Water Reflections
+    this._volLightDir.copy(nBlend > 0.55 ? this._planetDir : this._sunDir).normalize();
+    if (this.postProcessing && this.postProcessing.passes) {
+      const volU = this.postProcessing.passes.volumetric.uniforms;
+      const gradeU = this.postProcessing.passes.grade.uniforms;
+      volU.uSunDir.value.copy(this._volLightDir);
+      if (this.world && this.world.sunLight) {
+        volU.uSunColor.value.copy(this.world.sunLight.color);
+      }
+      volU.uSigma.value = lerp(lerp(0.00065, 0.00125, sBlend), 0.00085, nBlend);
+      this.postProcessing._sunDirNorm.copy(this._volLightDir);
+      gradeU.uFlareStrength.value = lerp(lerp(0.14, 0.22, sBlend), 0.04, nBlend);
+      gradeU.uBloomStrength.value = lerp(lerp(0.30, 0.38, sBlend), 0.46, nBlend);
+      gradeU.uBaseExposure.value = lerp(lerp(1.04, 1.08, sBlend), 1.18, nBlend);
+    }
+
+    if (this.world && this.world.planarReflection) {
+      this.world.planarReflection.sharedUniforms.uSunDir.value.copy(this._volLightDir);
+      this.world.planarReflection.sharedUniforms.uNightFactor.value = skyNightK;
+      this.world.planarReflection.sharedUniforms.uWeatherClarity.value = 1.0;
+    }
+
+    // 7. Homeworld Water Shader Uniforms & Milo's Night Headlamp
+    const hwWaterU =
+      this.world?.spacecraft?.homeworldActivityVisuals?.waterUniforms || null;
+    if (hwWaterU) {
+      if (hwWaterU.uSunDir) hwWaterU.uSunDir.value.copy(this._volLightDir);
+      if (hwWaterU.uSunColor && this.world?.sunLight) {
+        hwWaterU.uSunColor.value.copy(this.world.sunLight.color);
+      }
+      if (hwWaterU.uSunsetFactor) hwWaterU.uSunsetFactor.value = sBlend;
+      if (hwWaterU.uNightFactor) hwWaterU.uNightFactor.value = nBlend;
+    }
+
+    if (this.robot && this.robot.setNightHeadlamp) {
+      const nightLamp = smoothstep(0.35, 0.82, nBlend);
+      this.robot.setNightHeadlamp(nightLamp, nightLamp);
+    }
+    if (this.weatherParticles) {
+      this.weatherParticles.update(elapsed, camera, 0, nBlend * 0.65);
+    }
+    if (this.sound && this.sound.setWeatherIntensity) {
+      this.sound.setWeatherIntensity(0, 0);
     }
   }
 
   update(dt, elapsed, camera, isPaused = false, { isTitle = false } = {}) {
     const timeMode = (this.state.settings && this.state.settings.timeMode) || 'cycle';
     const weatherMode = (this.state.settings && this.state.settings.weatherMode) || 'dynamic';
+    const timeModeChanged = timeMode !== this._resolvedTimeMode;
+    const weatherModeChanged = weatherMode !== this._resolvedWeatherMode;
+    this._resolvedTimeMode = timeMode;
+    this._resolvedWeatherMode = weatherMode;
+    if (isPaused && (timeModeChanged || weatherModeChanged)) {
+      this.postProcessing?.resetExposure?.();
+    }
 
     // Title screen never consumes the 150s Level 1 clear-sky onboarding timer or triggers background storms!
     if (!isPaused && !isTitle) {
@@ -277,32 +517,59 @@ export class AtmosphereSystem {
     }
 
     // 1. Resolve Target Day/Twilight/Night Phase & Sun Altitude
-    let sunAltitudeSin = 0.78;
-    let sunAzimuth = 0.58;
+    let targetSunAltitudeSin = 0.78;
+    let targetSunAzimuth = 0.58;
     let targetNight = 0.0;
-    let twilightAmt = 0.0;
+    let targetTwilight = 0.0;
 
     if (timeMode === 'day') {
-      sunAltitudeSin = 0.78;
-      sunAzimuth = 0.58;
+      targetSunAltitudeSin = 0.78;
+      targetSunAzimuth = 0.58;
       targetNight = 0.0;
-      twilightAmt = 0.0;
+      targetTwilight = 0.0;
     } else if (timeMode === 'night') {
-      sunAltitudeSin = -0.45;
-      sunAzimuth = 2.6;
+      targetSunAltitudeSin = -0.45;
+      targetSunAzimuth = 2.6;
       targetNight = 1.0;
-      twilightAmt = 0.0;
+      targetTwilight = 0.0;
     } else {
       const orbitalAngle = (this.cyclePhase - 0.03) * Math.PI * 2;
-      sunAltitudeSin = clamp(Math.sin(orbitalAngle) + 0.18, -0.85, 0.96);
-      sunAzimuth = 0.35 + this.cyclePhase * Math.PI * 1.65;
-      targetNight = smoothstep(0.12, -0.18, sunAltitudeSin);
-      twilightAmt =
-        smoothstep(0.34, 0.05, Math.abs(sunAltitudeSin - 0.02)) * (1.0 - targetNight * 0.65);
+      targetSunAltitudeSin = clamp(Math.sin(orbitalAngle) + 0.18, -0.85, 0.96);
+      targetSunAzimuth = 0.35 + this.cyclePhase * Math.PI * 1.65;
+      targetNight = smoothstep(0.12, -0.18, targetSunAltitudeSin);
+      targetTwilight =
+        smoothstep(0.34, 0.05, Math.abs(targetSunAltitudeSin - 0.02)) * (1.0 - targetNight * 0.65);
     }
 
-    const blendRate = timeMode === 'cycle' ? 3.5 : 5.5;
-    this.nightFactor = damp(this.nightFactor, targetNight, blendRate, dt);
+    const blendRate = timeMode === 'cycle' ? 1.6 : 1.15;
+    // Paused scenes paint only on demand. Settle an explicit preference change
+    // in that one paint, while preserving the exact in-flight blend on ordinary
+    // pause entry, resize and other settings changes. Active play stays smooth.
+    if (isPaused) {
+      if (timeModeChanged) {
+        this.nightFactor = targetNight;
+        this._sunAltitudeSin = targetSunAltitudeSin;
+        this._sunAzimuth = targetSunAzimuth;
+        this._twilightAmt = targetTwilight;
+      }
+    } else {
+      this.nightFactor = damp(this.nightFactor, targetNight, blendRate, dt);
+      this._sunAltitudeSin = damp(this._sunAltitudeSin, targetSunAltitudeSin, blendRate, dt);
+      this._sunAzimuth = damp(this._sunAzimuth, targetSunAzimuth, blendRate, dt);
+      // Pass naturally through dusk/dawn twilight whenever the sun sweeps across the horizon
+      const horizonTwilight =
+        smoothstep(0.36, 0.04, Math.abs(this._sunAltitudeSin - 0.02)) * (1.0 - this.nightFactor * 0.55);
+      this._twilightAmt = damp(
+        this._twilightAmt,
+        Math.max(targetTwilight, horizonTwilight),
+        blendRate * 1.6,
+        dt
+      );
+    }
+
+    const sunAltitudeSin = this._sunAltitudeSin;
+    const sunAzimuth = this._sunAzimuth;
+    const twilightAmt = this._twilightAmt;
 
     // 2. Resolve Target Weather Weights (Title screen stays clear & welcoming unless user explicitly locked a weather mode)
     const activeWeather =
@@ -315,8 +582,15 @@ export class AtmosphereSystem {
     const targetStorm = activeWeather === 'sandstorm' ? 1.0 : 0.0;
     const wRate = weatherMode === 'dynamic' ? 0.55 : 3.2;
 
-    this.overcastWeight = damp(this.overcastWeight, targetOvercast, wRate, dt);
-    this.sandstormWeight = damp(this.sandstormWeight, targetStorm, wRate, dt);
+    if (isPaused) {
+      if (weatherModeChanged) {
+        this.overcastWeight = targetOvercast;
+        this.sandstormWeight = targetStorm;
+      }
+    } else {
+      this.overcastWeight = damp(this.overcastWeight, targetOvercast, wRate, dt);
+      this.sandstormWeight = damp(this.sandstormWeight, targetStorm, wRate, dt);
+    }
 
     // 3. Compute Sun & Twin-Star Vectors
     const clampedSinY = Math.max(-0.35, sunAltitudeSin);
@@ -376,7 +650,9 @@ export class AtmosphereSystem {
 
       const dayEnvInt = lerp(0.96, 0.62, Math.max(this.overcastWeight * 0.6, this.sandstormWeight * 0.85));
       const nightEnvInt = lerp(0.46, 0.30, this.sandstormWeight);
-      this.scene.environmentIntensity = lerp(dayEnvInt, nightEnvInt, this.nightFactor);
+      // Softly dip IBL intensity across the 0.54 PMREM swap so cubemap switching never pops
+      const probeCrossDip = 1.0 - 0.42 * Math.exp(-Math.pow((this.nightFactor - 0.54) / 0.10, 2));
+      this.scene.environmentIntensity = lerp(dayEnvInt, nightEnvInt, this.nightFactor) * probeCrossDip;
     }
 
     // 6. Step-Quantized Directional Sun <-> Azimuth-Matched Planet Moonlight Shadow Handoff
@@ -384,7 +660,7 @@ export class AtmosphereSystem {
     if (this.nightFactor < 0.56) {
       const shadowSinY = Math.max(0.28, sunAltitudeSin);
       const shadowCosY = Math.sqrt(Math.max(0.05, 1.0 - shadowSinY * shadowSinY));
-      const qStep = timeMode === 'cycle' ? Math.round(this.cyclePhase * 260) : -10;
+      const qStep = Math.round(sunAzimuth * 40 + sunAltitudeSin * 40);
       if (qStep !== this._quantizedStep) {
         this._quantizedStep = qStep;
         this._activeShadowOffset.set(
@@ -395,9 +671,9 @@ export class AtmosphereSystem {
         this._syncWorldShadowOffset(this._activeShadowOffset);
       }
 
-      const dayFade = smoothstep(0.56, 0.12, this.nightFactor);
+      const dayFade = smoothstep(0.55, 0.08, this.nightFactor);
       this.world.sunLight.color.copy(this._cSunNoon).lerp(this._cSunDusk, twilightAmt);
-      this.world.sunLight.intensity = (0.35 + 2.25 * dayFade) * weatherDim;
+      this.world.sunLight.intensity = 2.60 * dayFade * weatherDim;
     } else {
       // Starry Night Giant Ringed Planet Moonlight Key Light (azimuth matches KHARIS_PLANET_DIR!)
       if (this._quantizedStep !== -999) {
@@ -405,9 +681,9 @@ export class AtmosphereSystem {
         this._activeShadowOffset.copy(this._planetMoonOffset);
         this._syncWorldShadowOffset(this._planetMoonOffset);
       }
-      const moonFade = smoothstep(0.56, 0.92, this.nightFactor);
+      const moonFade = smoothstep(0.57, 0.94, this.nightFactor);
       this.world.sunLight.color.copy(this._cMoonCol);
-      this.world.sunLight.intensity = (0.32 + 0.62 * moonFade) * (1.0 - this.sandstormWeight * 0.45);
+      this.world.sunLight.intensity = 0.94 * moonFade * (1.0 - this.sandstormWeight * 0.45);
     }
 
     // Hemisphere Sky/Ground Fill & Distance Fog
@@ -419,11 +695,8 @@ export class AtmosphereSystem {
 
     this._tmpColB.copy(this._cHemiGndDay).lerp(this._cHemiGndNight, this.nightFactor);
     this.world.hemiLight.groundColor.copy(this._tmpColB);
-    this.world.hemiLight.intensity = lerp(
-      0.56 + this.overcastWeight * 0.22,
-      0.34,
-      this.nightFactor
-    );
+    this.world.hemiLight.intensity =
+      lerp(0.56 + this.overcastWeight * 0.22, 0.34, this.nightFactor) + twilightAmt * 0.14;
 
     if (this.scene.fog) {
       this._tmpColA
@@ -479,18 +752,40 @@ export class AtmosphereSystem {
     if (this.world.planarReflection) {
       this.world.planarReflection.sharedUniforms.uSunDir.value.copy(this._volLightDir);
       this.world.planarReflection.sharedUniforms.uNightFactor.value = this.nightFactor;
+      const weatherClarity = clamp(
+        1.0 - this.overcastWeight * 0.42 - this.sandstormWeight * 0.68,
+        0.2,
+        1.0
+      );
+      this.world.planarReflection.sharedUniforms.uWeatherClarity.value = weatherClarity;
+    }
+
+    // Sync live atmospheric weights into GameState for dynamic Solar Furnace smelting multiplier
+    if (this.state && typeof this.state.setSolarEnv === 'function' && !isTitle) {
+      this.state.setSolarEnv(
+        this.nightFactor,
+        this.overcastWeight,
+        this.sandstormWeight
+      );
     }
 
     // 8. Drive Milo's Automatic Night / Sandstorm Headlamp, GPU Weather Particles & Wind Audio
     if (this.robot && this.robot.setNightHeadlamp) {
-      const lampStrength = isTitle
+      const isMobile =
+        this.world && typeof this.world.isCoarseMobileDevice === 'function'
+          ? this.world.isCoarseMobileDevice()
+          : false;
+      const nightLamp = smoothstep(0.32, 0.78, this.nightFactor);
+      const coneStrength = isTitle
         ? 0
-        : clamp(
-            Math.max(smoothstep(0.32, 0.78, this.nightFactor), this.sandstormWeight * 0.65),
-            0,
-            1
-          );
-      this.robot.setNightHeadlamp(lampStrength);
+        : clamp(Math.max(nightLamp, this.sandstormWeight * 0.65), 0, 1);
+      // On mobile daytime sandstorms, keep the atmospheric visor beam cone WITHOUT activating the full-scene PBR SpotLight!
+      const spotStrength = isTitle
+        ? 0
+        : isMobile
+          ? nightLamp
+          : coneStrength;
+      this.robot.setNightHeadlamp(spotStrength, coneStrength);
     }
 
     if (this.weatherParticles) {

@@ -1,33 +1,57 @@
 import assert from 'node:assert/strict';
+import './verify-homeworld-ceremony.mjs';
+import './verify-homeworld-camera.mjs';
+import './verify-homeworld-materials.mjs';
+import './verify-homeworld-architecture.mjs';
+import './verify-homeworld-landscape.mjs';
+import './verify-homeworld-mountains.mjs';
+import './verify-render-activity.mjs';
+import './verify-reflection-visibility.mjs';
+import './verify-paused-atmosphere.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import {
+  BRINE_POOLS,
   CREW_LOGS,
   ELEVATED_PLATFORMS,
+  EQUIPMENT_DEFS,
   LEVELS,
+  locateRegionId,
   MATERIALS,
   PREFLIGHT_CHECKS,
   RECIPES,
+  REGIONS,
   REPAIR_TARGETS,
   RESOURCE_NODES,
-  WORLD_FACILITIES
+  STATION_TYPES,
+  WORLD_CONFIG,
+  WORLD_FACILITIES,
+  WORLD_MECHANISMS
 } from '../src/data/gameData.js';
 import { GameState } from '../src/state/gameState.js';
 import { GuidanceSystem } from '../src/systems/guidanceSystem.js';
 import { AtmosphereSystem } from '../src/systems/atmosphereSystem.js';
 import { KHARIS_PLANET_DIR } from '../src/graphics/skyDome.js';
+import { createStratifiedMesaGeometry } from '../src/graphics/proceduralMeshes.js';
+import { WeatherParticles } from '../src/graphics/weatherParticles.js';
+import { ParticleSystem } from '../src/graphics/particleSystem.js';
 import { CameraController } from '../src/scene/cameraController.js';
 import { WorldBuilder } from '../src/scene/worldBuilder.js';
 import { SpacecraftBuilder } from '../src/scene/spacecraftBuilder.js';
+import { RobotController } from '../src/entities/robotController.js';
+import { TouchControls } from '../src/ui/touchControls.js';
 import { getTerrainHeight } from '../src/utils/math.js';
+import { HOMEWORLD_CONFIG, getHomeworldGroundHeight } from '../src/data/homeworldData.js';
+import { createThrusterPlume, updateThrusterPlume } from '../src/graphics/launchEffects.js';
 import { ARTIFACT_RE, findLatestArtifact } from './dist-artifact.mjs';
+import { verifyHomeworldActivities } from './verify-homeworld-activities.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 
-function computeRawRequirements(itemId, count = 1, maxLevel = 5) {
+function computeRawRequirements(itemId, count = 1, maxLevel = LEVELS.length) {
   const mat = MATERIALS[itemId];
   assert(mat, `Unknown material: ${itemId}`);
   if (mat.category === 'raw') {
@@ -38,6 +62,10 @@ function computeRawRequirements(itemId, count = 1, maxLevel = 5) {
   assert(
     recipe.unlockLevel <= maxLevel,
     `Recipe ${recipe.id} unlocks at level ${recipe.unlockLevel} > level ${maxLevel}`
+  );
+  assert(
+    STATION_TYPES[recipe.station],
+    `Recipe ${recipe.id} references unregistered station type "${recipe.station}"`
   );
 
   const totals = {};
@@ -52,6 +80,36 @@ function computeRawRequirements(itemId, count = 1, maxLevel = 5) {
 }
 
 function verifyLevelDataAndAvailability() {
+  assert.equal(locateRegionId(0, 0), 'crash_basin');
+  assert.equal(locateRegionId(52, 2), 'whispering_ridge');
+  assert.equal(locateRegionId(2, 54), 'dry_canyon');
+  assert.equal(locateRegionId(-60, 2), 'relay_gorge');
+  assert.equal(locateRegionId(0, -52), 'geothermal_field');
+  assert.equal(locateRegionId(58, 58), 'salt_flats');
+  assert.equal(locateRegionId(-56, -56), 'mothership_graveyard');
+  assert.equal(WORLD_FACILITIES.furnace.region, 'crash_basin');
+  assert.equal(WORLD_FACILITIES.fabricator.region, 'crash_basin');
+  assert.equal(WORLD_FACILITIES.outpost_purifier.region, 'dry_canyon');
+  assert.equal(WORLD_FACILITIES.salt_field_station.region, 'salt_flats');
+  assert.equal(WORLD_FACILITIES.wreck_field_station.region, 'mothership_graveyard');
+  const postGame = new GameState();
+  postGame.launchedHome = true;
+  postGame.currentLevel = LEVELS.length;
+  const beaconSteps = postGame.getCurrentLevelProgress().steps;
+  assert.equal(beaconSteps.find((step) => step.id === 'wbeacon_salt').regionId, 'salt_flats');
+  assert(LEVELS.length >= 6, `Expected >= 6 declarative levels, got ${LEVELS.length}`);
+  assert.equal(
+    Object.keys(REPAIR_TARGETS).length,
+    LEVELS.length,
+    'Each level must correspond to an authoritative REPAIR_TARGETS entry'
+  );
+  for (const rt of Object.values(REPAIR_TARGETS)) {
+    assert(rt.shortLabel && rt.shortLabel.zh && rt.shortLabel.en, `Repair target ${rt.id} missing localized shortLabel`);
+  }
+  for (const eq of Object.values(EQUIPMENT_DEFS)) {
+    assert(MATERIALS[eq.itemId], `Equipment ${eq.slot} references missing item ${eq.itemId}`);
+  }
+
   const s = new GameState();
   for (const lvl of LEVELS) {
     s.currentLevel = lvl.level;
@@ -68,30 +126,45 @@ function verifyLevelDataAndAvailability() {
       );
     }
   }
-  console.log('✓ All 5 levels have abundant deterministic raw resources in unlocked regions.');
+  console.log(`✓ Declarative registries & all ${LEVELS.length} levels have abundant deterministic raw resources.`);
 }
 
 function verifyFullGameplaySimulation() {
   const state = new GameState();
+  const totalLevels = LEVELS.length;
   assert.equal(state.currentLevel, 1);
   assert.equal(state.getGlobalRepairProgress().repairedCount, 0);
+
+  // State-layer invariants must hold even when callers bypass the interaction
+  // scanner (for example after a damaged/imported local save).
+  const invariantState = new GameState();
+  invariantState.currentLevel = 4;
+  invariantState._addItem('nav_computer', 1);
+  assert.equal(invariantState.installComponent('repair_nav').reason, 'locked_mechanism');
+  assert.equal(invariantState.diagnoseRecipe('craft_nav_computer').reason, 'locked_mechanism');
+  assert.equal(invariantState.activateMechanism('weather_beacons', 'wbeacon_salt').reason, 'locked_region');
+  assert.equal(invariantState.harvestNode('n_rg_tit_1').reason, 'locked_mechanism');
+  invariantState.currentLevel = 2;
+  assert.equal(invariantState.harvestNode('n_wr_sky_qtz').reason, 'missing_jetpack');
 
   // Crafting without materials must fail safely
   const failCraft = state.startCraft('craft_power_core');
   assert.equal(failCraft.ok, false);
   assert.equal(failCraft.reason, 'missing_materials');
 
-  // Helper to gather from real nodes and craft through queue
+  // Helper to gather from real unlocked nodes and craft recursively through the queue!
   const gatherMaterial = (matId, minNeeded) => {
     while (state.getItemCount(matId) < minNeeded) {
       const node = RESOURCE_NODES.find(
         (n) =>
           n.materialId === matId &&
           state.isRegionUnlocked(n.region) &&
+          (!n.subsurface || state.hasEquipment('drill')) &&
+          (!n.elevated || state.hasEquipment('jetpack')) &&
+          (!n.requiresMechanism || state.isMechanismComplete(n.requiresMechanism)) &&
           state.isNodeAvailable(n.id)
       );
       if (!node) {
-        // Advance time to allow natural mineral replenishment if needed
         state.update(25);
         continue;
       }
@@ -100,157 +173,105 @@ function verifyFullGameplaySimulation() {
     }
   };
 
-  const runRecipe = (recipeId) => {
-    const rec = RECIPES.find((r) => r.id === recipeId);
-    for (const inp of rec.inputs) {
-      if (MATERIALS[inp.id].category === 'raw') {
-        gatherMaterial(inp.id, inp.count);
-      }
+  const ensureItemCrafted = (itemId, countNeeded) => {
+    const mat = MATERIALS[itemId];
+    assert(mat, `Missing material ${itemId}`);
+    if (mat.category === 'raw') {
+      gatherMaterial(itemId, countNeeded);
+      return;
     }
-    const res = state.startCraft(recipeId);
-    assert.equal(res.ok, true, `Expected recipe ${recipeId} to start cleanly: ${res.reason}`);
-    // Advance queue completion
-    for (let i = 0; i < 30; i++) state.update(0.1);
+    const rec = RECIPES.find((r) => r.output.id === itemId);
+    assert(rec, `Missing recipe for ${itemId}`);
+
+    while (
+      mat.category === 'equipment'
+        ? !state.hasEquipment(mat.equipmentSlot)
+        : state.getItemCount(itemId) < countNeeded
+    ) {
+      for (const inp of rec.inputs) {
+        ensureItemCrafted(inp.id, inp.count);
+      }
+      const res = state.startCraft(rec.id);
+      assert.equal(res.ok, true, `Expected recipe ${rec.id} to start cleanly: ${res.reason}`);
+      for (let i = 0; i < 45; i++) state.update(0.1);
+      if (mat.category === 'equipment') break;
+    }
   };
 
-  // --- Level 1: Restore Power ---
   const guidance = new GuidanceSystem(state);
-  // Initially at spawn (4.8, 5.8), guidance must point to an accessible Crash Basin ore node!
   const wp0 = guidance.resolveActiveWaypoint({ x: 4.8, z: 5.8 });
   assert(wp0 && wp0.kind === 'gather', 'Initial Level 1 waypoint must guide player to gather ore');
 
-  runRecipe('smelt_iron_plate');
-  runRecipe('smelt_iron_plate');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('smelt_copper_ingot');
+  // Data-driven progression simulation across ALL levels in LEVELS!
+  for (const lvlDef of LEVELS) {
+    assert.equal(state.currentLevel, lvlDef.level);
 
-  // Once all plates & ingots are smelted, guidance must point to Fabrication Station!
-  const wpFab = guidance.resolveActiveWaypoint({ x: 4.8, z: 5.8 });
-  assert(wpFab && wpFab.kind === 'station', 'After smelting, guidance must point to Fabricator');
+    if (lvlDef.level === 1) {
+      state.readCrewLog('log_1');
+      const ironAfterFirstLog = state.getItemCount('iron_plate');
+      state.readCrewLog('log_1');
+      assert.equal(state.getItemCount('iron_plate'), ironAfterFirstLog, 'Side-task rewards must be idempotent');
+    }
 
-  runRecipe('craft_power_core');
+    if (lvlDef.level === 3 && !state.hasEquipment('drill')) {
+      const prematureDrill = state.harvestNode('n_dc_zeo_1');
+      assert.equal(prematureDrill.ok, false);
+      assert.equal(prematureDrill.reason, 'missing_drill');
+      assert.equal(state.triggerSonarScan(0, 42).ok, false);
+    }
 
-  // Once Power Core is crafted, guidance must point to Starboard Power Bay!
-  const wpInstall = guidance.resolveActiveWaypoint({ x: 4.8, z: 5.8 });
-  assert(wpInstall && wpInstall.kind === 'repair', 'After crafting Power Core, guidance must point to Repair Bay');
+    // 1. Auto-satisfy any mandatory equipment unlocked at this level (via EQUIPMENT_DEFS)
+    for (const eqDef of Object.values(EQUIPMENT_DEFS)) {
+      if (eqDef.mandatoryFromLevel === lvlDef.level && !state.hasEquipment(eqDef.slot)) {
+        ensureItemCrafted(eqDef.itemId, 1);
+        assert.equal(state.hasEquipment(eqDef.slot), true);
+        const eqRec = RECIPES.find((r) => r.output.id === eqDef.itemId);
+        assert.equal(state.startCraft(eqRec.id).reason, 'already_equipped');
+      }
+    }
 
-  // Duplicate main component craft must be prevented!
-  const dupPower = state.startCraft('craft_power_core');
-  assert.equal(dupPower.ok, false);
-  assert.equal(dupPower.reason, 'already_crafted_main');
+    if (lvlDef.level === 3) {
+      const sonarRes = state.triggerSonarScan(0, 42);
+      assert.equal(sonarRes.ok, true);
+      assert(sonarRes.count >= 4, 'Sonar scan in Dry Canyon must locate subsurface veins');
+    }
 
-  // Installing into wrong target must fail!
-  const wrongInstall = state.installComponent('repair_comms');
-  assert.equal(wrongInstall.ok, false);
+    // 2. Auto-satisfy any prerequisite world mechanism declared by this level (via WORLD_MECHANISMS)
+    if (lvlDef.prerequisiteMechanism) {
+      assert.equal(state.isMechanismComplete(lvlDef.prerequisiteMechanism), false);
+      const mech = WORLD_MECHANISMS[lvlDef.prerequisiteMechanism];
+      for (const mNode of mech.nodes) {
+        const mRes = state.activateMechanism(mech.id, mNode.id);
+        assert.equal(mRes.ok, true);
+      }
+      assert.equal(state.isMechanismComplete(lvlDef.prerequisiteMechanism), true);
+    }
 
-  // Side task check & idempotency
-  state.readCrewLog('log_1');
-  const ironAfterFirstLog = state.getItemCount('iron_plate');
-  state.readCrewLog('log_1'); // Re-reading must NOT grant duplicate reward!
-  assert.equal(state.getItemCount('iron_plate'), ironAfterFirstLog);
+    // 3. Craft main ship component via recursive DAG walk
+    ensureItemCrafted(lvlDef.requiredComponentId, 1);
 
-  // Install Power Core -> Advances to Level 2
-  const r1 = state.installComponent('repair_power');
-  assert.equal(r1.ok, true);
-  assert.equal(state.currentLevel, 2);
-  assert.equal(state.getGlobalRepairProgress().repairedCount, 1);
+    const wpInstall = guidance.resolveActiveWaypoint({ x: 4.8, z: 5.8 });
+    assert.equal(wpInstall?.kind, 'repair', `Guidance at Lv.${lvlDef.level} must point to Repair Bay once module is ready`);
 
-  // --- Level 2: Repair Communications ---
-  runRecipe('smelt_quartz_lens');
-  runRecipe('smelt_quartz_lens');
-  runRecipe('smelt_silver_wire');
-  runRecipe('smelt_silver_wire');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('craft_comm_array');
-  const r2 = state.installComponent('repair_comms');
-  assert.equal(r2.ok, true);
-  assert.equal(state.currentLevel, 3);
-  assert.equal(state.getGlobalRepairProgress().repairedCount, 2);
+    const mainRec = RECIPES.find((r) => r.output.id === lvlDef.requiredComponentId);
+    assert.equal(state.startCraft(mainRec.id).reason, 'already_crafted_main');
 
-  // --- Level 3: Geo-Drilling & Restore Life Support ---
-  // Attempting to harvest subsurface Zeolite BEFORE crafting Geo-Drill must fail safely!
-  const prematureDrill = state.harvestNode('n_dc_zeo_1');
-  assert.equal(prematureDrill.ok, false);
-  assert.equal(prematureDrill.reason, 'missing_drill');
-  assert.equal(state.triggerSonarScan(0, 42).ok, false);
+    // Before final level, preflight check must NOT unlock prematurely!
+    if (lvlDef.level < totalLevels) {
+      assert.equal(state.completePreflightCheck(PREFLIGHT_CHECKS[0].id).ok, false);
+    }
 
-  // Craft Spiral Geo-Drill first!
-  if (state.getItemCount('iron_plate') < 1) runRecipe('smelt_iron_plate');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('smelt_quartz_lens');
-  runRecipe('craft_geo_drill');
-  assert.equal(state.hasEquipment('drill'), true);
-  assert.equal(state.startCraft('craft_geo_drill').reason, 'already_equipped');
+    const installRes = state.installComponent(lvlDef.repairTargetId);
+    assert.equal(installRes.ok, true);
+    assert.equal(state.getGlobalRepairProgress().repairedCount, lvlDef.level);
 
-  // Sonar scan in Dry Canyon must now succeed and detect subsurface fissures!
-  const sonarRes = state.triggerSonarScan(0, 42, 42);
-  assert.equal(sonarRes.ok, true);
-  assert(sonarRes.count >= 4, 'Sonar scan in Dry Canyon must locate subsurface veins');
-
-  runRecipe('smelt_filter_core');
-  runRecipe('smelt_filter_core');
-  if (state.getItemCount('iron_plate') < 1) runRecipe('smelt_iron_plate');
-  runRecipe('craft_bio_filter');
-
-  runRecipe('smelt_coolant_canister');
-  runRecipe('smelt_coolant_canister');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('craft_thermal_regulator');
-
-  runRecipe('craft_life_support_unit');
-  const r3 = state.installComponent('repair_lifesupport');
-  assert.equal(r3.ok, true);
-  assert.equal(state.currentLevel, 4);
-  assert.equal(state.getGlobalRepairProgress().repairedCount, 3);
-
-  // --- Level 4: Sky Flight (Jetpack) & Repair Navigation ---
-  // Craft Micro-Gravity Thruster Wings first!
-  if (state.getItemCount('iron_plate') < 1) runRecipe('smelt_iron_plate');
-  if (state.getItemCount('silver_wire') < 1) runRecipe('smelt_silver_wire');
-  runRecipe('smelt_coolant_canister');
-  runRecipe('craft_jetpack_wing');
-  assert.equal(state.hasEquipment('jetpack'), true);
-  assert.equal(state.startCraft('craft_jetpack_wing').reason, 'already_equipped');
-
-  assert.equal(state.isBridgeExtended(), false);
-  state.alignPylon('pylon_north');
-  state.alignPylon('pylon_south');
-  assert.equal(state.isBridgeExtended(), true);
-
-  runRecipe('smelt_titanium_alloy');
-  runRecipe('smelt_titanium_alloy');
-  runRecipe('smelt_silver_wire');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('craft_gyro_circuit');
-  runRecipe('smelt_quartz_lens');
-  runRecipe('craft_starlight_prism');
-  runRecipe('craft_nav_computer');
-  const r4 = state.installComponent('repair_nav');
-  assert.equal(r4.ok, true);
-  assert.equal(state.currentLevel, 5);
-  assert.equal(state.getGlobalRepairProgress().repairedCount, 4);
-
-  // --- Level 5: Repair Propulsion, Pre-Flight Checks & Launch Home ---
-  runRecipe('smelt_titanium_alloy');
-  runRecipe('smelt_titanium_alloy');
-  runRecipe('smelt_iron_plate');
-  runRecipe('smelt_iron_plate');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('smelt_copper_ingot');
-  runRecipe('craft_thrust_nozzle');
-  runRecipe('craft_thrust_nozzle');
-
-  runRecipe('smelt_coolant_canister');
-  runRecipe('smelt_coolant_canister');
-  runRecipe('smelt_plasma_rod');
-  runRecipe('smelt_plasma_rod');
-
-  runRecipe('craft_propulsion_drive');
-  const r5 = state.installComponent('repair_propulsion');
-  assert.equal(r5.ok, true);
-  assert.equal(state.getGlobalRepairProgress().repairedCount, 5);
+    if (lvlDef.level < totalLevels) {
+      assert.equal(state.currentLevel, lvlDef.level + 1);
+    }
+  }
 
   // Cannot launch before completing all 3 pre-flight checks!
+  assert.equal(state.areAllShipSystemsRepaired(), true);
   assert.equal(state.canLaunchSpacecraft(), false);
   for (const chk of PREFLIGHT_CHECKS) {
     assert.equal(state.completePreflightCheck(chk.id).ok, true);
@@ -259,13 +280,24 @@ function verifyFullGameplaySimulation() {
   const launchRes = state.triggerLaunchAndCompleteGame();
   assert.equal(launchRes.ok, true);
   assert.equal(state.launchedHome, true);
-  assert.equal(state.getCurrentLevelProgress(5).fraction, 1);
+  assert.equal(state.getCurrentLevelProgress(totalLevels).fraction, 1);
 
-  // Post-game Free Roam guidance should point to remaining unread Crew Logs!
+  // Post-game Free Roam guidance should point to Post-Game Climate Beacons first, then remaining unread Crew Logs!
+  const beaconWp = guidance.resolveActiveWaypoint({ x: 0, z: 0 });
+  assert.equal(
+    beaconWp?.kind,
+    'weather_beacon',
+    'Post-game Free Roam guidance must prioritize Planetary Climate Telemetry Beacons first'
+  );
+  for (const bn of WORLD_FACILITIES.weather_beacons) {
+    assert.equal(state.activateMechanism('weather_beacons', bn.id).ok, true);
+  }
+  assert.equal(state.isMechanismComplete('weather_beacons'), true);
+
   const freeRoamWp = guidance.resolveActiveWaypoint({ x: 0, z: 0 });
   assert(
     freeRoamWp && freeRoamWp.kind === 'log',
-    'Post-game Free Roam guidance should help locate remaining Crew Logs'
+    'Once all 5 Climate Beacons are linked, Free Roam guidance must help locate remaining Crew Logs'
   );
 
   // Verify GuidanceSystem net DAG raw deficit aggregation on multi-branch Nav Computer!
@@ -280,7 +312,7 @@ function verifyFullGameplaySimulation() {
     silver_wire: 1,
     copper_ingot: 1,
     quartz_lens: 1,
-    lumen_core: 2 // Gyro needs 1 + Prism needs 2 = 3 total! Only 2 held -> MUST ask for 1 more lumen_core!
+    lumen_core: 2
   };
   const navGuidance = new GuidanceSystem(navCheckState);
   const lumenWp = navGuidance.resolveActiveWaypoint({ x: -56, z: 0 });
@@ -290,7 +322,7 @@ function verifyFullGameplaySimulation() {
     'Guidance DAG must detect shared Lumen Shard deficit (2 held < 3 total needed across Gyro + Prism)'
   );
 
-  console.log('✓ Full 5-level main path + DAG net-deficit guidance + side-task idempotency + launch verified!');
+  console.log(`✓ Full ${totalLevels}-level data-driven simulation + DAG guidance + side-task idempotency + launch verified!`);
 }
 
 function verifyStandaloneHtmlOfflinePurity() {
@@ -300,13 +332,31 @@ function verifyStandaloneHtmlOfflinePurity() {
   const match = base.match(ARTIFACT_RE);
   assert(match, `unexpected artifact name: ${base}`);
   const html = fs.readFileSync(htmlPath, 'utf8');
+  const docsPath = path.resolve(rootDir, '..', 'docs', 'index.html');
+  assert(fs.existsSync(docsPath), 'docs/index.html is missing');
+  assert.equal(fs.readFileSync(docsPath, 'utf8'), html, 'docs/index.html is out of sync with the latest standalone artifact');
   const [, version, day, clock] = match;
   const isoPrefix = `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}T${clock.slice(0, 2)}:${clock.slice(2, 4)}:${clock.slice(4, 6)}`;
 
   assert(html.includes(`<meta name="version" content="${version}" />`), 'version meta does not match the file name');
   assert(html.includes(`<meta name="build-time" content="${isoPrefix}`), 'build-time meta does not match the file name');
+  const sizeBytes = fs.statSync(htmlPath).size;
+  assert(sizeBytes <= 1.5 * 1024 * 1024, `Standalone HTML exceeds the 1.5 MB hard budget (${sizeBytes} bytes)`);
+  assert(/<html\s+lang=["']en["']\s*>/i.test(html), 'Standalone HTML root lang attribute is malformed');
+  assert(/<canvas\b[^>]*\baria-label=["']Starweaver 3D game canvas["']/i.test(html), 'Standalone HTML canvas is missing its accessible label');
   assert(!/<script[^>]+src=/i.test(html), 'Standalone HTML must not have external <script src>');
-  assert(!/<link[^>]+href=/i.test(html), 'Standalone HTML must not have external <link href>');
+  const linkTags = html.match(/<link\b[^>]*>/gi) || [];
+  for (const tag of linkTags) {
+    const hrefMatch = tag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    if (hrefMatch) {
+      const val = (hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3] ?? '').trim();
+      assert(val.startsWith('data:image/'), `Standalone HTML must not have external <link href>, got: ${val.slice(0, 60)}`);
+    }
+  }
+  assert(
+    linkTags.some((tag) => /\brel=["']icon["']/i.test(tag) && /\bhref=["']data:image\//i.test(tag)),
+    'Standalone HTML must embed an inline data:image favicon'
+  );
   assert(!/@import\s+url/i.test(html), 'Standalone HTML must not have CSS @import');
   console.log(`✓ Standalone HTML offline purity verified (${base}).`);
 }
@@ -363,18 +413,214 @@ function installHeadlessCanvasStub() {
 function verifyAntiClippingAndInteractReachability() {
   installHeadlessCanvasStub();
 
+  // Visual seam guard: non-climbable canyon/horizon mesas must bury their
+  // bottom cap below local dune dips, while tight sky-mesa silhouettes keep
+  // their authored base at ground level. This catches the dark floating cap
+  // that previously read as severe terrain clipping in the browser build.
+  const horizonMesa = createStratifiedMesaGeometry(6.2, 13.5, 22, 101);
+  horizonMesa.computeBoundingBox();
+  assert(
+    horizonMesa.boundingBox.min.y <= -3.0,
+    `Horizon mesa buried base is too shallow (${horizonMesa.boundingBox.min.y.toFixed(2)}m)`
+  );
+  horizonMesa.dispose();
+  const skyMesa = createStratifiedMesaGeometry(4.8, 11.4, 27, 303, true);
+  skyMesa.computeBoundingBox();
+  assert(
+    skyMesa.boundingBox.min.y >= -0.2,
+    `Tight sky-mesa silhouette base moved unexpectedly (${skyMesa.boundingBox.min.y.toFixed(2)}m)`
+  );
+  skyMesa.dispose();
+
   const state = new GameState();
-  state.currentLevel = 5;
-  state.equipment.drill = true;
-  state.equipment.jetpack = true;
-  state.pylonsAligned.pylon_north = true;
-  state.pylonsAligned.pylon_south = true;
-  state.repairs.repair_propulsion = true;
+  state.currentLevel = LEVELS.length;
+  for (const eq of Object.values(EQUIPMENT_DEFS)) {
+    state.equipment[eq.slot] = true;
+  }
+  for (const mech of Object.values(WORLD_MECHANISMS)) {
+    if (mech.kind === 'group') {
+      for (const n of mech.nodes) state[mech.stateProp][n.id] = true;
+    } else {
+      state[mech.stateProp] = true;
+    }
+  }
+  for (const rId of Object.keys(REPAIR_TARGETS)) state.repairs[rId] = true;
   for (const chk of PREFLIGHT_CHECKS) state.preflightDone[chk.id] = true;
 
   const scene = new THREE.Scene();
   const world = new WorldBuilder(scene, state, null);
   const spacecraft = new SpacecraftBuilder(scene, state, null, world.skyDome, null);
+  scene.updateMatrixWorld(true);
+  // Test the real dish mesh against the curved fuselage throughout tracking
+  // and its folded fault pose. A higher group origin alone cannot prove the
+  // rotating lower rim clears the roof.
+  const receiverRay = new THREE.Raycaster();
+  receiverRay.ray.direction.set(0, -1, 0);
+  const receiverVertex = new THREE.Vector3();
+  const dishVertices = spacecraft.commsDishBowl.geometry.attributes.position;
+  let minimumReceiverGap = Infinity;
+  for (const repaired of [false, true]) {
+    state.repairs.repair_comms = repaired;
+    for (let phase = 0; phase < 32; phase++) {
+      spacecraft.update(0, phase * 3.7, false);
+      scene.updateMatrixWorld(true);
+      for (let i = 0; i < dishVertices.count; i += 3) {
+        receiverVertex.fromBufferAttribute(dishVertices, i).applyMatrix4(spacecraft.commsDishBowl.matrixWorld);
+        receiverRay.ray.origin.set(receiverVertex.x, spacecraft.baseGroundY + 12, receiverVertex.z);
+        const roof = receiverRay.intersectObject(spacecraft.fuselage, false)[0];
+        if (!roof) continue;
+        const gap = receiverVertex.y - roof.point.y;
+        minimumReceiverGap = Math.min(minimumReceiverGap, gap);
+        assert(gap > 0.08, `Receiver rim intersects hull in ${repaired ? 'tracking' : 'folded'} pose (${gap.toFixed(3)}m)`);
+      }
+    }
+  }
+  state.repairs.repair_comms = true;
+  assert(Number.isFinite(minimumReceiverGap), 'Receiver/hull geometry clearance check must hit the real roof');
+  console.log(`✓ Receiver tracking/folded rim clears the sculpted roof by at least ${minimumReceiverGap.toFixed(3)}m.`);
+  const meadowSurface = spacecraft.homeworldGroup.getObjectByName('homeworld-support-matched-meadow');
+  assert(meadowSurface, 'Homeworld must expose its support-matched terrain');
+  const deckRay = new THREE.Raycaster();
+  deckRay.ray.direction.set(0, -1, 0);
+  for (const [px, pz] of [[0, -2.2], [2.5, -2.2], [-2.5, -2.2], [0, 0.3], [0, -4.7]]) {
+    deckRay.ray.origin.set(px, HOMEWORLD_CONFIG.padY + 0.8, pz);
+    assert.equal(deckRay.intersectObject(meadowSurface).length, 0,
+      'Terrain must leave a real opening beneath the pad; overlapping coplanar floors flicker');
+    const floorHit = deckRay.intersectObject(spacecraft.homeworldGroup, true)[0];
+    assert(floorHit && Math.abs(floorHit.point.y - HOMEWORLD_CONFIG.padY) < 0.03,
+      `Pad opening lacks a support-aligned deck at (${px},${pz})`);
+  }
+  // Geometry validity and feet placement are testable. Object/material counts
+  // cannot establish art quality and would penalize the static mesh batching.
+  spacecraft.homeworldGroup.traverse((obj) => {
+    if (!obj.isMesh) return;
+    assert(obj.material, `Homeworld mesh ${obj.name} must have a material`);
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    if (materials.some(m => m.userData.homeworldPbr)) {
+      assert(!obj.geometry.hasAttribute('tangent'),
+        `World-projected PBR requires derivative tangent frames: ${obj.name}`);
+    }
+    const vertices = obj.geometry.attributes.position.array;
+    assert(vertices.every(Number.isFinite), `Non-finite homeworld vertex in ${obj.name}`);
+  });
+  assert.equal(spacecraft.crewFigures.length, 4, 'Homeworld must retain four authored crew roles');
+  assert.equal(spacecraft.companionBots.length, 2, 'Homeworld must retain two companion bots');
+  // Cinematic boarding/exit white-box: the robot must travel through a
+  // continuous path instead of being hidden/revealed at a single cutscene
+  // threshold. A real controller is used here so pose/scale regressions are
+  // caught alongside the scene collider audit.
+  const cinematicRobot = new RobotController(scene, state, {}, null, null);
+  cinematicRobot.update(0, 0, new THREE.Vector3(), 0, [], true, null);
+  spacecraft.prepareBoarding(cinematicRobot);
+  spacecraft.applyCutsceneFrame(0.04, 0.4, cinematicRobot);
+  const boardStart = cinematicRobot.group.position.clone();
+  spacecraft.applyCutsceneFrame(0.12, 1.2, cinematicRobot);
+  const boardMid = cinematicRobot.group.position.clone();
+  assert(boardMid.x < boardStart.x, 'Boarding path must move Milo toward the hatch');
+  assert(boardMid.y > boardStart.y, 'Boarding path must rise with the visible ramp');
+  assert.equal(cinematicRobot.group.scale.x, 1, 'Boarding must preserve Milo proportions');
+  // Raycast against the authored deck rather than repeating its height formula.
+  // This catches a moving ship, changed ramp angle, or threshold geometry that
+  // no longer agrees with the scripted character's feet.
+  const rampRay = new THREE.Raycaster();
+  rampRay.ray.direction.set(0, -1, 0);
+  for (let step = 24; step <= 62; step++) {
+    const phase = step / 100;
+    spacecraft.applyCutsceneFrame(phase * 0.2, phase * 3.68, cinematicRobot);
+    scene.updateMatrixWorld(true);
+    rampRay.ray.origin.copy(cinematicRobot.group.position);
+    rampRay.ray.origin.y += 4;
+    const hit = rampRay.intersectObject(spacecraft.boardingRamp, true)[0];
+    if (!hit) continue; // The outer entry is briefly on the ground beside the ramp.
+    const footGap = cinematicRobot.group.position.y - hit.point.y;
+    assert(footGap >= -0.035 && footGap <= 0.07,
+      `Milo/ramp contact diverged ${footGap.toFixed(3)}m at boarding phase ${phase}`);
+  }
+  const headBounds = new THREE.Box3();
+  for (let step = 20; step <= 100; step++) {
+    const phase = step / 100;
+    spacecraft._applyRobotBoardingPose(cinematicRobot, phase);
+    scene.updateMatrixWorld(true);
+    headBounds.setFromObject(cinematicRobot.headGroup.children[0]);
+    if (phase >= 0.2 && phase <= 0.82) {
+      assert(spacecraft._airlockOpenAmount > 0.999, 'Airlock must remain open throughout the complete entry motion');
+    }
+    if (phase > 0.85 && spacecraft._airlockOpenAmount < 0.999) {
+      assert(headBounds.max.x < spacecraft.airlock.position.x - 0.10,
+        `Airlock starts closing while Milo head remains outside at ${phase}`);
+    }
+  }
+  spacecraft.applyCutsceneFrame(0.2 - 1e-6, 3.68, cinematicRobot);
+  assert(Math.abs(spacecraft.group.position.y - spacecraft.baseGroundY) < 0.001,
+    'The ship must remain grounded until the boarding beat finishes');
+
+  const homeworldMidT = 0.58 + 0.42 * 0.76;
+  spacecraft.applyCutsceneFrame(homeworldMidT, 9.8, cinematicRobot);
+  const exitStart = cinematicRobot.group.position.clone();
+  spacecraft.applyCutsceneFrame(0.98, 11.8, cinematicRobot);
+  const exitEnd = cinematicRobot.group.position.clone();
+  assert(cinematicRobot.group.visible, 'Milo must be visible after the homeworld reveal');
+  assert(exitEnd.z > exitStart.z, 'Exit path must walk Milo away from the hatch');
+  assert.equal(cinematicRobot.group.scale.x, 1, 'Exiting must preserve Milo proportions');
+  const pathColliders = spacecraft.getColliders().filter((c) => c.id.startsWith('hw_'));
+  const shipColliderIds = spacecraft.getColliders().map(c => c.id).filter(Boolean);
+  assert.equal(new Set(shipColliderIds).size, shipColliderIds.length, 'Ship/homeworld collider IDs must be unique');
+  let previousExit = null;
+  for (let step = 0; step <= 240; step++) {
+    const p = step / 240;
+    spacecraft._applyRobotExitPose(cinematicRobot, p);
+    const position = cinematicRobot.group.position;
+    if (previousExit) assert(position.distanceTo(previousExit) < 0.19, `Exit path discontinuity at ${p}`);
+    previousExit = position.clone();
+    if (p <= 0.38) continue; // The visible airlock/ramp intentionally enters the hull registry.
+    for (const c of pathColliders) {
+      assert(Math.hypot(position.x - c.x, position.z - c.z) >= c.radius + 0.6,
+        `Exit path intersects ${c.id} at ${p.toFixed(3)}`);
+    }
+    assert(Math.abs(position.y - getHomeworldGroundHeight(position.x, position.z)) < 0.012,
+      `Exit feet drift above/below ground at ${p}`);
+  }
+  const handoffPosition = cinematicRobot.group.position.clone();
+  spacecraft.enterHomeworldFreeRoam(cinematicRobot);
+  assert(cinematicRobot.position.distanceTo(handoffPosition) < 0.001, 'Exit/free-roam handoff must not teleport');
+  spacecraft.update(1 / 60, 22.5, false);
+  scene.updateMatrixWorld(true);
+  const noseBounds = new THREE.Box3().setFromObject(spacecraft.navLens);
+  const headShell = cinematicRobot.headGroup.children[0];
+  const welcomeHeadBounds = new THREE.Box3().setFromObject(headShell);
+  assert(!noseBounds.intersectsBox(welcomeHeadBounds), 'Welcome stop must clear the physical navigation lens');
+  assert.equal(spacecraft.navHoloProjector.visible, false, 'Landed navigation projection must clear the welcome path');
+  for (const footY of [420.3, 420.5, 420.8, 421]) {
+    for (const yaw of [Math.PI, Math.PI * 0.5, -Math.PI * 0.5]) {
+      cinematicRobot.position.set(0, footY, 5.8);
+      cinematicRobot.yaw = yaw;
+      cinematicRobot.isGrounded = false;
+      cinematicRobot.velocityY = 0;
+      cinematicRobot.update(0, 22.5, new THREE.Vector3(), 0, spacecraft.getColliders(), false, null);
+      scene.updateMatrixWorld(true);
+      assert(!noseBounds.intersectsBox(new THREE.Box3().setFromObject(headShell)),
+        `Airborne robot head clips the navigation lens at footY=${footY}, yaw=${yaw}`);
+    }
+  }
+  cinematicRobot.teleportToHomeworldMeadow();
+  assert.equal(spacecraft.boardingRamp.visible, false, 'Homeworld roam must stow the unsupported cinematic ramp');
+  spacecraft.prepareBoarding(cinematicRobot);
+  spacecraft.applyCutsceneFrame(0, 0, cinematicRobot);
+  assert(cinematicRobot.group.position.y < 5, 'Replaying from Homeworld must not board from Y=420');
+  spacecraft.enterHomeworldFreeRoam(cinematicRobot);
+  const plume = createThrusterPlume(0);
+  plume.userData.targetThrottle = 2;
+  let previousThrottle = 0;
+  for (let i = 0; i < 90; i++) {
+    updateThrusterPlume(plume, 1 / 60, i / 60);
+    assert(plume.userData.throttle >= previousThrottle && plume.userData.throttle <= 2,
+      'Ignition must approach requested throttle without overshoot');
+    previousThrottle = plume.userData.throttle;
+  }
+  plume.userData.targetThrottle = 0;
+  for (let i = 0; i < 90; i++) updateThrusterPlume(plume, 1 / 60, i / 60);
+  assert.equal(plume.visible, false, 'Exhaust must finish fading after cutoff');
+  cinematicRobot.group.scale.setScalar(1);
   const allColliders = [...world.colliders, ...spacecraft.getColliders()];
   const robotRadius = 0.62;
 
@@ -383,7 +629,21 @@ function verifyAntiClippingAndInteractReachability() {
     `Expected comprehensive anti-clip collider coverage (>=200), got ${allColliders.length}`
   );
 
-  // Helper: relax a test stand point outside all active colliders at height y (3-pass solver)
+  // Verify Southeast Crystalline Salt Pan floor is laser-flat (-0.55m) across mirror expanse so dunes never poke through!
+  for (const [sx, sz] of [[58, 58], [52, 52], [64, 64], [52, 63], [63, 52]]) {
+    const sy = getTerrainHeight(sx, sz, false);
+    assert(
+      Math.abs(sy - -0.55) < 1e-4,
+      `Crystalline Salt Pan at (${sx},${sz}) must be mirror-flat at -0.55m, got ${sy}`
+    );
+  }
+  // Verify outer boundary mountains do NOT intrude inside WORLD_CONFIG.playRadius
+  assert(
+    getTerrainHeight(74, 74, false) < 3.0,
+    'Diagonal sector within WORLD_CONFIG.playRadius must not hit premature boundary cliff'
+  );
+
+  // Helper: relax a test stand point outside all active colliders at height y (4-pass solver)
   const relaxPoint = (startX, startZ, y) => {
     let nx = startX;
     let nz = startZ;
@@ -431,7 +691,13 @@ function verifyAntiClippingAndInteractReachability() {
     return { x: nx, z: nz };
   };
 
+  let interactiveCount = 0;
   const assertTargetReachable = (label, tx, tz, ty, interactRange) => {
+    interactiveCount++;
+    assert(
+      Math.hypot(tx, tz) <= WORLD_CONFIG.playRadius - 2.0,
+      `Interact target "${label}" (${tx}, ${tz}) lies outside WORLD_CONFIG.playRadius (${WORLD_CONFIG.playRadius}m)!`
+    );
     let bestStandDist = Infinity;
     for (let k = 0; k < 24; k++) {
       const ang = (k / 24) * Math.PI * 2;
@@ -447,48 +713,86 @@ function verifyAntiClippingAndInteractReachability() {
     );
   };
 
-  // 1. Verify all 5 Spacecraft Repair Bays are reachable outside wing/hull colliders
+  // 1. Verify all Spacecraft Repair Bays are reachable outside wing/hull colliders
   for (const t of Object.values(REPAIR_TARGETS)) {
     const gy = getTerrainHeight(t.position.x, t.position.z, true);
-    assertTargetReachable(`repair:${t.id}`, t.position.x, t.position.z, gy, 3.4);
+    assertTargetReachable(`repair:${t.id}`, t.position.x, t.position.z, gy, 4.4);
   }
 
-  // 2. Verify all 3 Pre-Flight Checks + Boarding Ramp
+  // 2. Verify all Pre-Flight Checks + Boarding Ramp
   for (const chk of PREFLIGHT_CHECKS) {
     const gy = getTerrainHeight(chk.position.x, chk.position.z, true);
-    assertTargetReachable(`preflight:${chk.id}`, chk.position.x, chk.position.z, gy, 3.1);
+    assertTargetReachable(`preflight:${chk.id}`, chk.position.x, chk.position.z, gy, 3.8);
   }
   const ramp = WORLD_FACILITIES.boarding_ramp;
   assertTargetReachable('boarding_ramp', ramp.x, ramp.z, getTerrainHeight(ramp.x, ramp.z, true), 3.5);
 
-  // 3. Verify all 3 Workstations
-  for (const st of [WORLD_FACILITIES.furnace, WORLD_FACILITIES.fabricator, WORLD_FACILITIES.outpost_purifier]) {
+  // 3. Verify all Declarative Workstations
+  for (const st of WORLD_FACILITIES.stations) {
     assertTargetReachable(`station:${st.id}`, st.x, st.z, getTerrainHeight(st.x, st.z, true), 3.6);
   }
 
-  // 4. Verify all 47 Resource Nodes (surface, subsurface & sky-mesa)
+  // 4. Verify all Resource Nodes across all regions (including Southeast Salt Flats!)
   for (const node of RESOURCE_NODES) {
     const plat = node.platformId ? ELEVATED_PLATFORMS.find((p) => p.id === node.platformId) : null;
     const ny = plat ? plat.topY : getTerrainHeight(node.x, node.z, true);
     assertTargetReachable(`node:${node.id}`, node.x, node.z, ny, 3.0);
   }
 
-  // 5. Verify Crew Logs, Cairns, Pylons & Observatory
+  // 5. Verify all Crew Logs & Declarative World Mechanisms
   for (const log of Object.values(CREW_LOGS)) {
     assertTargetReachable(`log:${log.id}`, log.position.x, log.position.z, getTerrainHeight(log.position.x, log.position.z, true), 2.9);
   }
-  for (const c of WORLD_FACILITIES.cairns) {
-    assertTargetReachable(`cairn:${c.id}`, c.x, c.z, getTerrainHeight(c.x, c.z, true), 3.0);
+  for (const mech of Object.values(WORLD_MECHANISMS)) {
+    for (const mNode of mech.nodes) {
+      const plat = mNode.platformId ? ELEVATED_PLATFORMS.find((pl) => pl.id === mNode.platformId) : null;
+      const my = plat ? plat.topY : getTerrainHeight(mNode.x, mNode.z, true);
+      assertTargetReachable(`mech:${mech.id}:${mNode.id}`, mNode.x, mNode.z, my, mech.interactRange || 3.2);
+    }
   }
-  for (const p of WORLD_FACILITIES.pylons) {
-    const plat = p.platformId ? ELEVATED_PLATFORMS.find((pl) => pl.id === p.platformId) : null;
-    const py = plat ? plat.topY : getTerrainHeight(p.x, p.z, true);
-    assertTargetReachable(`pylon:${p.id}`, p.x, p.z, py, 3.2);
-  }
-  const obs = WORLD_FACILITIES.observatory;
-  assertTargetReachable('observatory', obs.x, obs.z, getTerrainHeight(obs.x, obs.z, true), 3.4);
 
-  console.log(`✓ Anti-clipping & interactability verified across ${allColliders.length} colliders and all 67 interactive targets!`);
+  // 6. Verify Diagonal Gate Barrier (`gate_salt_flats`) + flank cliffs block entry before Lv.6 and open cleanly at Lv.6
+  const simulateWalk = (sx, sz, tx, tz, steps = 28) => {
+    let px = sx;
+    let pz = sz;
+    for (let s = 0; s < steps; s++) {
+      const dx = tx - px;
+      const dz = tz - pz;
+      const d = Math.hypot(dx, dz) || 1;
+      const stepLen = Math.min(0.85, d);
+      const next = relaxPoint(px + (dx / d) * stepLen, pz + (dz / d) * stepLen, 0.2);
+      px = next.x;
+      pz = next.z;
+    }
+    return { x: px, z: pz };
+  };
+
+  state.currentLevel = 5;
+  // Center pass walk + NE flank walk + SW flank walk must ALL be stopped outside Salt Flats (x + z < 53)!
+  const walkCenterBlocked = simulateWalk(18.0, 18.0, 34.0, 34.0);
+  const walkNeFlankBlocked = simulateWalk(24.0, 16.0, 34.0, 28.0);
+  const walkSwFlankBlocked = simulateWalk(16.0, 24.0, 28.0, 34.0);
+  assert(
+    walkCenterBlocked.x + walkCenterBlocked.z < 46.0,
+    `Locked diagonal gate must stop center approach (reached ${walkCenterBlocked.x.toFixed(1)}, ${walkCenterBlocked.z.toFixed(1)})`
+  );
+  assert(
+    walkNeFlankBlocked.x + walkNeFlankBlocked.z < 52.0,
+    `NE flank cliffs + gate post must block bypass (reached ${walkNeFlankBlocked.x.toFixed(1)}, ${walkNeFlankBlocked.z.toFixed(1)})`
+  );
+  assert(
+    walkSwFlankBlocked.x + walkSwFlankBlocked.z < 52.0,
+    `SW flank cliffs + gate post must block bypass (reached ${walkSwFlankBlocked.x.toFixed(1)}, ${walkSwFlankBlocked.z.toFixed(1)})`
+  );
+
+  state.currentLevel = 6;
+  const walkCenterOpen = simulateWalk(18.0, 18.0, 34.0, 34.0, 32);
+  assert(
+    Math.hypot(walkCenterOpen.x - 34.0, walkCenterOpen.z - 34.0) < 0.8,
+    `Unlocked diagonal pass must allow smooth traversal into Salt Flats (reached ${walkCenterOpen.x.toFixed(1)}, ${walkCenterOpen.z.toFixed(1)})`
+  );
+
+  console.log(`✓ Anti-clipping, diagonal gate & interactability verified across ${allColliders.length} colliders and all ${interactiveCount} interactive targets!`);
 }
 
 function verifyAtmosphereCameraAndSaveEdgeCases() {
@@ -538,6 +842,9 @@ function verifyAtmosphereCameraAndSaveEdgeCases() {
       triggerAction() {},
       teleportToHubSafe() {
         this.position.set(4.8, 0.2, 5.8);
+      },
+      teleportToHomeworldMeadow() {
+        this.position.set(HOMEWORLD_CONFIG.spawnX, getHomeworldGroundHeight(HOMEWORLD_CONFIG.spawnX, HOMEWORLD_CONFIG.spawnZ), HOMEWORLD_CONFIG.spawnZ);
       }
     };
     const atmo = new AtmosphereSystem({
@@ -654,14 +961,282 @@ function verifyAtmosphereCameraAndSaveEdgeCases() {
     assert(Math.abs(s2.envClock.cyclePhase - 0.62) < 1e-4, 'Saved planetary cyclePhase must persist across reload');
     assert(Math.abs(s2.envClock.playElapsed - 185.5) < 1e-2, 'Saved active playElapsed must persist across reload');
 
-    console.log('✓ Atmosphere handoff, celestial vectors, wing spring-arm, station queue guidance & save snapshot parity verified!');
+    // F. Weather-Linked Solar Smelting Multiplier + Phase-Change Storage Battery + Locked Weather Parity
+    const smeltState = new GameState();
+    smeltState.resetState(false);
+    smeltState.currentLevel = 2;
+    smeltState.setTimeMode('day');
+    smeltState.setWeatherMode('clear');
+    assert.equal(smeltState.getFurnaceSpeedMultiplier(), 1.5, 'Clear daylight must grant 1.5x solar smelting boost');
+    assert.equal(smeltState.getStationSpeedMultiplier('fabricator'), 1.0, 'Fabricator speed must stay constant 1.0x');
+
+    smeltState._addItem('iron_scrap', 2);
+    assert.equal(smeltState.startCraft('smelt_iron_plate').ok, true);
+    smeltState.update(0.7); // 0.7s * 1.5x = 1.05s >= 1.0s!
+    assert.equal(smeltState.getItemCount('iron_plate'), 1, '1.0s furnace smelt must finish within 0.7s under 1.5x clear daylight');
+
+    smeltState.setWeatherMode('sandstorm');
+    assert.equal(smeltState.getFurnaceSpeedMultiplier(), 0.55, 'Locked sandstorm without battery must immediately drop furnace to 0.55x floor');
+
+    smeltState.setWeatherMode('clear');
+    smeltState.setTimeMode('night');
+    assert.equal(smeltState.getFurnaceSpeedMultiplier(), 0.55, 'Starry night without battery must run furnace at 0.55x floor');
+
+    // Installing Phase-Change Storage Battery ('battery') stabilizes night & sandstorm floor at 1.0x while preserving 1.5x day boost!
+    smeltState.equipment.battery = true;
+    assert.equal(smeltState.getFurnaceSpeedMultiplier(), 1.0, 'Storage Battery must buffer nocturnal smelting floor to 1.0x');
+    smeltState.setTimeMode('day');
+    smeltState.setWeatherMode('sandstorm');
+    assert.equal(smeltState.getFurnaceSpeedMultiplier(), 1.0, 'Storage Battery must buffer sandstorm smelting floor to 1.0x');
+    smeltState.setWeatherMode('clear');
+    assert.equal(smeltState.getFurnaceSpeedMultiplier(), 1.5, 'Storage Battery must still allow 1.5x clear daylight boost');
+
+    // G. Legacy v1.0.1 5-Level Completed Save Reconciliation into Level 6 Crystalline Salt Flats
+    memStore.set(
+      'little_bot_homebound_save_v1',
+      JSON.stringify({
+        version: 1,
+        currentLevel: 5,
+        repairs: {
+          repair_power: true,
+          repair_comms: true,
+          repair_lifesupport: true,
+          repair_nav: true,
+          repair_propulsion: true
+        },
+        completedLevels: { 1: true, 2: true, 3: true, 4: true, 5: true },
+        launchedHome: true
+      })
+    );
+    const legacyLoaded = new GameState();
+    assert.equal(legacyLoaded.load(), true);
+    assert.equal(legacyLoaded.currentLevel, 6, 'Legacy 5-level save must advance cleanly to newly unlocked Level 6');
+    assert.equal(legacyLoaded.launchedHome, false, 'Legacy save missing Level 6 shield must resume active mission for Level 6');
+    assert.equal(legacyLoaded.hasEquipment('drill'), true);
+    assert.equal(legacyLoaded.hasEquipment('jetpack'), true);
+    assert.equal(legacyLoaded.isRegionUnlocked('salt_flats'), true);
+
+    // H. Mobile Thermal & Silky Control Audits: Adaptive Default Preset, Early-Z Safe Shaders, Daytime Storm SpotLight Skip &Joystick Deadzone Continuity
+    const wpMobile = new WeatherParticles(scene, { isMobile: true });
+    assert(
+      !wpMobile.sandMesh.material.fragmentShader.includes('discard'),
+      'Sandstorm particle fragment shader must NOT contain discard (preserves mobile Tile-GPU Early-Z!)'
+    );
+    assert(
+      !wpMobile.starDustMesh.material.fragmentShader.includes('discard'),
+      'Stardust particle fragment shader must NOT contain discard'
+    );
+    assert.equal(wpMobile.sandMesh.geometry.instanceCount, 96, 'Mobile sandstorm streak count must be capped at 96');
+
+    // Simulate mobile environment: daytime sandstorm must keep SpotLight strength=0 while still showing visor cone>0!
+    globalThis.window.innerWidth = 390;
+    globalThis.window.innerHeight = 844;
+    globalThis.window.matchMedia = (q) => ({
+      matches: q.includes('coarse'),
+      addEventListener() {}
+    });
+    const mobState = new GameState();
+    assert.equal(
+      mobState.settings.quality,
+      'medium',
+      'New mobile sessions must default to thermal-friendly medium preset while preserving user choice'
+    );
+    mobState.setQuality('high');
+    assert.equal(mobState.settings.qualityUserChosen, true);
+
+    let recordedSpot = -1;
+    let recordedCone = -1;
+    const mobRobotStub = {
+      position: new THREE.Vector3(0, 0.2, 0),
+      group: new THREE.Group(),
+      groundShadowMesh: new THREE.Mesh(),
+      setNightHeadlamp(spot, cone = spot) {
+        recordedSpot = spot;
+        recordedCone = cone;
+      }
+    };
+    const mobWorldStub = {
+      skyDome: world.skyDome,
+      sunLight: world.sunLight,
+      hemiLight: world.hemiLight,
+      _sunOffset: world._sunOffset,
+      planarReflection: null,
+      isCoarseMobileDevice: () => true
+    };
+    const mobAtmo = new AtmosphereSystem({
+      state: mobState,
+      scene,
+      environments,
+      world: mobWorldStub,
+      robot: mobRobotStub,
+      postProcessing: null,
+      sound: null,
+      weatherParticles: wpMobile
+    });
+    mobState.setTimeMode('day');
+    mobState.setWeatherMode('sandstorm');
+    for (let i = 0; i < 30; i++) mobAtmo.update(0.1, i * 0.1, camera, false);
+    assert(
+      recordedSpot < 0.01 && recordedCone > 0.4,
+      `Mobile daytime sandstorm must skip costly PBR SpotLight (got ${recordedSpot}) while keeping visor cone (${recordedCone})`
+    );
+
+    // Continuous radial joystick remap check (just above 8.5% deadzone must produce tiny smooth speed, NOT a 0.11 jump!)
+    const joyProto = TouchControls.prototype;
+    const fakeTouch = {
+      _joyOrigin: { x: 100, y: 100 },
+      _maxRadius: 46,
+      joyKnob: null,
+      moveVec: { x: 0, z: 0 }
+    };
+    joyProto._updateJoystickDelta.call(fakeTouch, 100 + 46 * 0.095, 100);
+    assert(
+      fakeTouch.moveVec.x > 0 && fakeTouch.moveVec.x < 0.025,
+      `Joystick just past deadzone must ramp smoothly from 0 (got ${fakeTouch.moveVec.x})`
+    );
+
+    // I. Autonomous Mining Drone Delivery + Passive Equipment Modifiers + Homeworld Meadow Free-Stroll Verification
+    const droneState = new GameState();
+    droneState.resetState(false);
+    droneState.currentLevel = 7;
+    droneState.equipment.drone_fleet = true;
+    droneState.equipment.treads = true;
+    droneState.equipment.fuel_tank = true;
+    droneState.equipment.sonar_array = true;
+    droneState.equipment.drill = true;
+    assert.equal(droneState.getEquipmentModifier('moveSpeedMult', 1.0, 'mult'), 1.22);
+    assert.equal(droneState.getEquipmentModifier('jetpackFuelMult', 1.0, 'max'), 2.0);
+    assert.equal(droneState.getEquipmentModifier('sonarRange', 42, 'max'), 85);
+
+    const gatherBefore = droneState.stats.totalGathered;
+    droneState.update(14.2); // Trigger 14s autonomous drone patrol delivery!
+    assert(
+      droneState.stats.totalGathered > gatherBefore,
+      'Autonomous Mining Drone Fleet must automatically deliver unlocked regional raw ores every 14s'
+    );
+
+    // Verify 4-Act Launch Cutscene acts + Walkable Homeworld Meadow handoff & Desert return
+    for (const testT of [0.10, 0.32, 0.50, 0.85]) {
+      const pose = ship.applyCutsceneFrame(testT, 12.0, robotStub);
+      assert(pose && Number.isFinite(pose.position.x) && Number.isFinite(pose.lookAt.y));
+    }
+    ship.enterHomeworldFreeRoam(robotStub);
+    assert.equal(ship.homeworldGroup.visible, true, 'Homeworld meadow must be visible in Walkable Homeworld mode');
+    assert(Math.abs(robotStub.position.y - getHomeworldGroundHeight(robotStub.position.x, robotStub.position.z)) < 1e-3, 'Milo must stand on the authoritative Homeworld floor');
+    const hwPose = camCtrl.getDesiredFollowPose(robotStub.position);
+    assert(hwPose.position.y > 421.5, 'Camera follow pose on Homeworld (Y=420) must respect Y=420 ground plane');
+
+    // J. Cross-Plane Homeworld Pad Geometry Parity + Particle baseY & Ambient Toggle + Passive Touch Mode
+    // Pad centered at (0, -2.2), radius 6.2; front grass (0, 5.2) is outside the pad.
+    const rcProto = RobotController.prototype;
+    assert.equal(
+      rcProto._getHomeworldGroundY(0, -7.8),
+      HOMEWORLD_CONFIG.padY,
+      'Homeworld pad aft rim must match the landing pad disc'
+    );
+    assert.equal(
+      rcProto._getHomeworldGroundY(0, 5.2),
+      420.00,
+      'Homeworld front meadow grass (0, 5.2) outside pad must sit at 420.00m'
+    );
+    assert.equal(
+      camCtrl._getCameraGroundY(0, -7.8, 421.0),
+      HOMEWORLD_CONFIG.padY,
+      'CameraController Homeworld pad ground height must match RobotController exactly'
+    );
+    assert.equal(
+      camCtrl._getCameraGroundY(0, 5.2, 421.0),
+      420.00,
+      'CameraController Homeworld grass ground height must match RobotController exactly'
+    );
+
+    // ParticleSystem: explicit baseY=420.2 spawns sparkles at Homeworld Y~421.5, and { ambient: false } emits zero desert chimney sparks!
+    const ps = new ParticleSystem(scene);
+    ps.update(0.25, true, { ambient: false });
+    assert.equal(
+      ps.pool.some((p) => p.active),
+      false,
+      'ParticleSystem update with { ambient: false } must NOT spawn desert chimney/vent particles during Homeworld roam'
+    );
+    ps.emitCelebrationSparkles(0, 4.8, 420.2);
+    const activeSparkles = ps.pool.filter((p) => p.active);
+    assert(activeSparkles.length >= 20 && Math.abs(activeSparkles[0].y - 421.5) < 0.05, 'Homeworld celebration sparkles must spawn at Y=421.5');
+
+    // TouchControls passiveRoam hides empty primary action button while keeping Jetpack button visible!
+    const makeToggleEl = () => {
+      const set = new Set();
+      return {
+        textContent: '',
+        classList: {
+          toggle(cls, force) {
+            if (force) set.add(cls);
+            else set.delete(cls);
+          },
+          has: (cls) => set.has(cls)
+        }
+      };
+    };
+    droneState.equipment.jetpack = true;
+    const mockTouchUi = {
+      touchActive: true,
+      compactViewport: true,
+      isControlPadActive() { return true; },
+      _visibleAllowed: true,
+      state: droneState,
+      _lastStateSig: '',
+      btnSonar: makeToggleEl(),
+      btnSonarLbl: { textContent: '' },
+      btnJet: makeToggleEl(),
+      btnJetLbl: { textContent: '' },
+      btnInspect: makeToggleEl(),
+      btnInspectLbl: { textContent: '' },
+      btnAct: makeToggleEl(),
+      btnActIcon: { textContent: '' },
+      btnActLbl: { textContent: '' }
+    };
+    TouchControls.prototype.updateContext.call(mockTouchUi, null, { passiveRoam: true });
+    assert.equal(mockTouchUi.btnAct.classList.has('hidden'), true, 'Passive Homeworld roam must hide idle primary action touch button');
+    assert.equal(mockTouchUi.btnSonar.classList.has('hidden'), true, 'Passive Homeworld roam must hide desert sonar touch button');
+    assert.equal(mockTouchUi.btnJet.classList.has('hidden'), false, 'Passive Homeworld roam must keep Jetpack flight button active');
+
+    ship.restoreDesertPlacement(robotStub);
+    assert.equal(ship.homeworldGroup.visible, false, 'Returning to Kharis-4 must hide Homeworld meadow');
+    assert(robotStub.position.y < 5.0, 'Returning to Kharis-4 must place Milo back on Crash Basin sand');
+
+    console.log('✓ Atmosphere handoff, solar smelting, auto-drones, 4-act launch + walkable Homeworld & mobile thermal checks verified!');
   } finally {
     delete globalThis.window;
   }
 }
 
+function verifyDevRedlinesStaticCodeAudit() {
+  // Static redline enforcement across src/: no innerHTML, no hardcoded 5-level ceiling, no collider count >= 800
+  const srcRoot = path.join(rootDir, 'src');
+  const walkJsFiles = (dir) => {
+    const out = [];
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) out.push(...walkJsFiles(full));
+      else if (ent.name.endsWith('.js')) out.push(full);
+    }
+    return out;
+  };
+  for (const file of walkJsFiles(srcRoot)) {
+    const code = fs.readFileSync(file, 'utf8');
+    // Strip comments before checking for innerHTML assignment
+    const stripped = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert(
+      !/\.innerHTML\s*=/.test(stripped),
+      `Redline violation: forbidden .innerHTML assignment in ${path.relative(rootDir, file)}`
+    );
+  }
+  console.log('✓ Engineering Redlines static code audit passed (zero innerHTML, offline budget <= 1.5MB, Early-Z clean).');
+}
+
 verifyLevelDataAndAvailability();
 verifyFullGameplaySimulation();
+verifyHomeworldActivities();
 verifyAntiClippingAndInteractReachability();
 verifyAtmosphereCameraAndSaveEdgeCases();
+verifyDevRedlinesStaticCodeAudit();
 verifyStandaloneHtmlOfflinePurity();

@@ -14,8 +14,8 @@ export class WeatherParticles {
     this.enabled = true;
 
     this._camPos = new THREE.Vector3();
-    this._buildSandstormStreaks(isMobile ? 160 : 420);
-    this._buildNocturnalStarDust(isMobile ? 90 : 200);
+    this._buildSandstormStreaks(isMobile ? 96 : 420);
+    this._buildNocturnalStarDust(isMobile ? 72 : 200);
   }
 
   _buildSandstormStreaks(count) {
@@ -46,7 +46,8 @@ export class WeatherParticles {
       uIntensity: { value: 0 },
       uNightFactor: { value: 0 },
       uCamPos: { value: new THREE.Vector3() },
-      uWindDir: { value: new THREE.Vector3(0.92, -0.12, 0.36).normalize() }
+      uWindDir: { value: new THREE.Vector3(0.92, -0.12, 0.36).normalize() },
+      uWispScale: { value: this.isMobile ? 0.56 : 1.0 }
     };
 
     const mat = new THREE.ShaderMaterial({
@@ -61,6 +62,7 @@ export class WeatherParticles {
         uniform float uIntensity;
         uniform vec3 uCamPos;
         uniform vec3 uWindDir;
+        uniform float uWispScale;
         varying vec2 vUv;
         varying float vAlpha;
 
@@ -75,28 +77,33 @@ export class WeatherParticles {
           vec3 center = uCamPos + rel;
           center.y = max(center.y, -1.5);
 
+          // Soft boundary fade at box edges + near-camera lens fade (prevents full-screen overdraw!)
+          vec3 edge = 1.0 - smoothstep(vec3(0.36), vec3(0.50), abs(rel / box));
+          float camDist = length(cameraPosition - center);
+          float nearFade = smoothstep(1.35, 3.8, camDist);
+          float isWisp = step(0.76, aSeed.w);
+          vAlpha = edge.x * edge.y * edge.z * nearFade * mix(0.50, 0.14, isWisp) * uIntensity;
+
+          // Zero-cost vertex collapse when alpha is negligible -> zero rasterized pixels!
+          if (vAlpha < 0.006) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
+
           // Velocity-aligned billboard basis
           vec3 toCam = normalize(cameraPosition - center);
           vec3 right = normalize(uWindDir);
           vec3 up = normalize(cross(toCam, right));
 
-          float isWisp = step(0.72, aSeed.w);
-          float len = mix(0.55 + aSeed.x * 0.65, 2.1 + aSeed.x * 1.2, isWisp);
-          float thick = mix(0.045 + aSeed.y * 0.035, 0.48 + aSeed.y * 0.35, isWisp);
+          float len = mix(0.52 + aSeed.x * 0.62, (1.85 + aSeed.x * 1.05) * uWispScale, isWisp);
+          float thick = mix(0.042 + aSeed.y * 0.032, (0.42 + aSeed.y * 0.28) * uWispScale, isWisp);
 
           vec3 wp = center + right * (position.x * len) + up * (position.y * thick);
-
-          // Soft boundary fade at box edges + near-camera lens fade
-          vec3 edge = 1.0 - smoothstep(vec3(0.36), vec3(0.50), abs(rel / box));
-          float camDist = length(cameraPosition - center);
-          float nearFade = smoothstep(0.8, 2.8, camDist);
-          vAlpha = edge.x * edge.y * edge.z * nearFade * mix(0.52, 0.16, isWisp) * uIntensity;
-
           gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
         }
       `,
       fragmentShader: `
-        precision highp float;
+        precision mediump float;
         uniform float uNightFactor;
         varying vec2 vUv;
         varying float vAlpha;
@@ -104,13 +111,12 @@ export class WeatherParticles {
         void main() {
           vec2 d = vUv - 0.5;
           float mask = exp(-dot(d * vec2(2.4, 3.2), d * vec2(2.4, 3.2)) * 2.2);
-          float a = mask * vAlpha;
-          if (a < 0.004) discard;
+          float a = clamp(mask * vAlpha, 0.0, 0.72);
 
           vec3 daySand = vec3(0.95, 0.72, 0.48);
           vec3 nightSand = vec3(0.26, 0.22, 0.24);
           vec3 col = mix(daySand, nightSand, uNightFactor);
-          gl_FragColor = vec4(col, clamp(a, 0.0, 0.75));
+          gl_FragColor = vec4(col, a);
         }
       `
     });
@@ -176,22 +182,26 @@ export class WeatherParticles {
           vec3 center = uCamPos + rel;
           center.y = max(center.y, 0.25);
 
+          vec3 edge = 1.0 - smoothstep(vec3(0.34), vec3(0.49), abs(rel / box));
+          float pulse = 0.55 + 0.45 * sin(uTime * (2.0 + aSeed.w * 2.5) + aSeed.z * 25.0);
+          vAlpha = edge.x * edge.y * edge.z * pulse * uIntensity * 0.85;
+          if (vAlpha < 0.006) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
+
           // Camera-facing soft glowing mote
           vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
           vec3 up    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
-          float pulse = 0.55 + 0.45 * sin(uTime * (2.0 + aSeed.w * 2.5) + aSeed.z * 25.0);
           float sz = (0.08 + aSeed.w * 0.09) * (0.7 + 0.3 * pulse);
           vec3 wp = center + (right * position.x + up * position.y) * sz;
-
-          vec3 edge = 1.0 - smoothstep(vec3(0.34), vec3(0.49), abs(rel / box));
-          vAlpha = edge.x * edge.y * edge.z * pulse * uIntensity * 0.85;
           vColor = mix(vec3(0.42, 0.92, 1.0), vec3(1.0, 0.84, 0.48), step(0.68, aSeed.w));
 
           gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
         }
       `,
       fragmentShader: `
-        precision highp float;
+        precision mediump float;
         varying vec2 vUv;
         varying vec3 vColor;
         varying float vAlpha;
@@ -200,8 +210,7 @@ export class WeatherParticles {
           float r = length(vUv - 0.5) * 2.0;
           float glow = pow(max(1.0 - r, 0.0), 2.4);
           float a = glow * vAlpha;
-          if (a < 0.004) discard;
-          gl_FragColor = vec4(vColor * 1.8, a);
+          gl_FragColor = vec4(vColor * (1.8 * a), a);
         }
       `
     });

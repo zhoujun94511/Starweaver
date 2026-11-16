@@ -41,32 +41,47 @@ const COMMON_GLSL = `
 
 const DEPTH_HALF_FRAG = `
   ${COMMON_GLSL}
+  #include <packing>
   uniform sampler2D tDepth;
+  uniform vec2 uFullTexel;
   uniform float uNear;
   uniform float uFar;
 
   void main() {
-    float d = texture2D(tDepth, vUv).r;
+    // Sample exact centers of the 2x2 full-res texel quad and pack 24/32-bit linear depth into RGBA8.
+    // Eliminates 10-bit HalfFloat depth quantization terraces that caused horizontal scanlines in SSAO!
+    vec2 q = uFullTexel * 0.5;
+    float d0 = texture2D(tDepth, vUv + vec2(-q.x, -q.y)).r;
+    float d1 = texture2D(tDepth, vUv + vec2( q.x, -q.y)).r;
+    float d2 = texture2D(tDepth, vUv + vec2(-q.x,  q.y)).r;
+    float d3 = texture2D(tDepth, vUv + vec2( q.x,  q.y)).r;
+    float d = min(min(d0, d1), min(d2, d3));
     float z = (uNear * uFar) / max(uFar - d * (uFar - uNear), 1e-4);
-    gl_FragColor = vec4(z, d, 0.0, 1.0);
+    gl_FragColor = packDepthToRGBA(clamp(z / uFar, 0.0, 1.0));
   }
 `;
 
 const SSAO_FRAG = `
   ${COMMON_GLSL}
+  #include <packing>
   uniform sampler2D tDepthHalf;
+  uniform float uFar;
   uniform vec2 uTanHalf;
   uniform vec2 uTexel;
   uniform float uRadius;
   uniform float uIntensity;
   uniform float uAspect;
 
+  float readHalfZ(vec2 uv) {
+    return unpackRGBAToDepth(texture2D(tDepthHalf, uv)) * uFar;
+  }
+
   vec3 viewPos(vec2 uv, float z) {
     return vec3((uv * 2.0 - 1.0) * uTanHalf * z, -z);
   }
 
   void main() {
-    float z0 = texture2D(tDepthHalf, vUv).r;
+    float z0 = readHalfZ(vUv);
     if (z0 <= 0.15 || z0 > 135.0) {
       gl_FragColor = vec4(1.0);
       return;
@@ -76,10 +91,10 @@ const SSAO_FRAG = `
     vec2 ox = vec2(uTexel.x, 0.0);
     vec2 oy = vec2(0.0, uTexel.y);
 
-    float zl = texture2D(tDepthHalf, vUv - ox).r;
-    float zr = texture2D(tDepthHalf, vUv + ox).r;
-    float zd = texture2D(tDepthHalf, vUv - oy).r;
-    float zu = texture2D(tDepthHalf, vUv + oy).r;
+    float zl = readHalfZ(vUv - ox);
+    float zr = readHalfZ(vUv + ox);
+    float zd = readHalfZ(vUv - oy);
+    float zu = readHalfZ(vUv + oy);
 
     vec3 dx = abs(zl - z0) < abs(zr - z0) ? P - viewPos(vUv - ox, zl) : viewPos(vUv + ox, zr) - P;
     vec3 dy = abs(zd - z0) < abs(zu - z0) ? P - viewPos(vUv - oy, zd) : viewPos(vUv + oy, zu) - P;
@@ -96,16 +111,16 @@ const SSAO_FRAG = `
       float ang = f * 18.849556 + rot;
       vec2 offset = vec2(cos(ang) / max(uAspect, 0.2), sin(ang)) * (f * rUv);
       vec2 suv = vUv + offset;
-      float sz = texture2D(tDepthHalf, suv).r;
+      float sz = readHalfZ(suv);
       vec3 V = viewPos(suv, sz) - P;
       float vv = dot(V, V);
       float vn = dot(V, N);
       float falloff = max(R2 - vv, 0.0);
-      occ += falloff * falloff * falloff * max((vn - (0.02 + 0.004 * z0)) / (vv + 0.006), 0.0);
+      occ += falloff * falloff * falloff * max((vn - (0.036 + 0.0065 * z0)) / (vv + 0.010), 0.0);
     }
 
-    float ao = max(0.0, 1.0 - (uIntensity * occ * 5.2) / max(R2 * R2 * R2 * float(AO_TAPS), 1e-5));
-    ao = mix(ao, 1.0, smoothstep(65.0, 135.0, z0));
+    float ao = max(0.0, 1.0 - (uIntensity * occ * 4.8) / max(R2 * R2 * R2 * float(AO_TAPS), 1e-5));
+    ao = mix(ao, 1.0, smoothstep(60.0, 130.0, z0));
     gl_FragColor = vec4(ao, ao, ao, 1.0);
   }
 `;
@@ -120,6 +135,7 @@ const VOLUMETRIC_FRAG = `
   uniform mat4 uShadowMatrix;
   uniform mat4 uCamWorld;
   uniform vec3 uCamPos;
+  uniform float uPlaneBaseY;
   uniform vec2 uTanHalf;
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
@@ -131,8 +147,8 @@ const VOLUMETRIC_FRAG = `
   uniform float uSpaceBlend;
   uniform float uNightFactor;
 
-  float heightDensity(float y) {
-    return 0.28 + 0.72 * exp(-max(y + 1.5, 0.0) / 14.0);
+  float heightDensity(float y, float planeBaseY) {
+    return 0.28 + 0.72 * exp(-max((y - planeBaseY) + 1.5, 0.0) / 14.0);
   }
 
   float hgPhase(float mu, float g) {
@@ -156,10 +172,11 @@ const VOLUMETRIC_FRAG = `
       return;
     }
 
-    float z = texture2D(tDepthHalf, vUv).r;
+    float z = unpackRGBAToDepth(texture2D(tDepthHalf, vUv)) * uFarZ;
     vec3 viewRay = vec3((vUv * 2.0 - 1.0) * uTanHalf, -1.0);
     float rayLen = length(viewRay);
     vec3 rd = normalize(mat3(uCamWorld) * viewRay);
+    float planeBaseY = uPlaneBaseY;
 
     float worldDist = z * rayLen;
     bool isSky = z > uFarZ * 0.96;
@@ -188,11 +205,11 @@ const VOLUMETRIC_FRAG = `
       vec3 p = uCamPos + rd * (tPrev + ds * jitter);
 
       float sh = uHasShadow > 0.5 ? sampleSunVisibility(p) : 1.0;
-      float ext = uSigma * heightDensity(p.y) * planetFade;
+      float ext = uSigma * heightDensity(p.y, planeBaseY) * planetFade;
       float stepT = exp(-ext * ds);
 
-      // Emphasize near/mid-ground canyon & arch shafts while keeping distant haze clean
-      float nearBoost = mix(1.95, 0.62, smoothstep(6.0, 72.0, tPrev));
+      // Emphasize mid-ground canyon & arch shafts without washing out foreground feet/grass
+      float nearBoost = smoothstep(2.5, 8.5, tPrev) * mix(1.75, 0.62, smoothstep(8.5, 72.0, tPrev));
       float nightRayDim = mix(1.45, 0.42, uNightFactor);
       vec3 inScatter = uSunColor * (phase * sh * nearBoost * nightRayDim) + ambCol * (0.45 + 0.55 * sh);
       accum += trans * inScatter * (1.0 - stepT);
@@ -218,21 +235,27 @@ const VOLUMETRIC_FRAG = `
 
 const BILATERAL_BLUR_FRAG = `
   ${COMMON_GLSL}
+  #include <packing>
   uniform sampler2D tSrc;
   uniform sampler2D tDepthHalf;
+  uniform float uFar;
   uniform vec2 uDir;
   uniform float uDepthTol;
 
+  float readHalfZ(vec2 uv) {
+    return unpackRGBAToDepth(texture2D(tDepthHalf, uv)) * uFar;
+  }
+
   void main() {
-    float z0 = min(texture2D(tDepthHalf, vUv).r, 320.0);
+    float z0 = min(readHalfZ(vUv), 320.0);
     vec4 sum = vec4(0.0);
     float wSum = 0.0;
-    for (int i = -3; i <= 3; i++) {
+    for (int i = -4; i <= 4; i++) {
       float fi = float(i);
       vec2 uv = vUv + uDir * fi;
-      float z = min(texture2D(tDepthHalf, uv).r, 320.0);
-      float wSpatial = 1.0 - abs(fi) * 0.21;
-      float wDepth = max(0.0, 1.0 - abs(z - z0) / (uDepthTol * z0 + 0.03));
+      float z = min(readHalfZ(uv), 320.0);
+      float wSpatial = exp(-(fi * fi) * 0.14);
+      float wDepth = max(0.0, 1.0 - abs(z - z0) / (uDepthTol * z0 + 0.04));
       float w = wSpatial * wDepth;
       sum += texture2D(tSrc, uv) * w;
       wSum += w;
@@ -243,6 +266,7 @@ const BILATERAL_BLUR_FRAG = `
 
 const COMPOSITE_AO_VOL_FRAG = `
   ${COMMON_GLSL}
+  #include <packing>
   uniform sampler2D tColor;
   uniform sampler2D tDepth;
   uniform sampler2D tDepthHalf;
@@ -273,7 +297,7 @@ const COMPOSITE_AO_VOL_FRAG = `
       for (int k = 0; k < 4; k++) {
         vec2 o = vec2(mod(float(k), 2.0), floor(float(k) * 0.5));
         vec2 suv = baseUv + o * texel;
-        float zh = min(texture2D(tDepthHalf, suv).r, 320.0);
+        float zh = min(unpackRGBAToDepth(texture2D(tDepthHalf, suv)) * uFar, 320.0);
         float wBilinear = (o.x > 0.5 ? f.x : 1.0 - f.x) * (o.y > 0.5 ? f.y : 1.0 - f.y);
         float w = max(wBilinear / (0.018 + abs(zh - z) / max(z, 0.1)), 1e-5);
         ao += texture2D(tAO, suv).r * w;
@@ -396,14 +420,43 @@ const ANAMORPHIC_STREAK_FRAG = `
   ${COMMON_GLSL}
   uniform sampler2D tSrc;
   uniform vec2 uStep;
+  uniform float uFirstPass;
+
+  vec3 sampleSoftY(vec2 uv, float dy) {
+    vec3 res = vec3(0.0);
+    if (dy <= 0.0) {
+      #if __VERSION__ >= 300
+        res = textureLod(tSrc, uv, 0.0).rgb;
+      #else
+        res = texture2D(tSrc, uv).rgb;
+      #endif
+    } else {
+      #if __VERSION__ >= 300
+        vec3 c0 = textureLod(tSrc, uv - vec2(0.0, dy), 0.0).rgb;
+        vec3 c1 = textureLod(tSrc, uv, 0.0).rgb;
+        vec3 c2 = textureLod(tSrc, uv + vec2(0.0, dy), 0.0).rgb;
+      #else
+        vec3 c0 = texture2D(tSrc, uv - vec2(0.0, dy)).rgb;
+        vec3 c1 = texture2D(tSrc, uv).rgb;
+        vec3 c2 = texture2D(tSrc, uv + vec2(0.0, dy)).rgb;
+      #endif
+      vec3 avg = c1 * 0.5 + (c0 + c2) * 0.25;
+      // Gate out low-energy terrain glints so only true high-emission cores produce lens streaks
+      float lum = luma(avg);
+      res = avg * smoothstep(1.35, 3.2, lum);
+    }
+    return res;
+  }
 
   void main() {
     vec3 acc = vec3(0.0);
     float ws = 0.0;
-    for (int i = -6; i <= 6; i++) {
+    float dy = uFirstPass > 0.5 ? uStep.y : 0.0;
+    vec2 hStep = vec2(uStep.x, 0.0);
+    for (int i = -5; i <= 5; i++) {
       float x = float(i);
-      float w = exp(-x * x / 14.0);
-      acc += texture2D(tSrc, vUv + uStep * x).rgb * w;
+      float w = exp(-x * x / 11.0);
+      acc += sampleSoftY(vUv + hStep * x, dy) * w;
       ws += w;
     }
     gl_FragColor = vec4(acc / ws, 1.0);
@@ -743,6 +796,7 @@ export class PostProcessingPipeline {
     this.bloomLevels = 5;
     this.adaptIndex = 0;
     this.frameIndex = 0;
+    this._exposureResetPending = false;
     this.dirtBaked = false;
 
     this._sunProjScratch = new THREE.Vector3();
@@ -819,9 +873,9 @@ export class PostProcessingPipeline {
           depthTexture: depthTex
         }),
         compositedHdr: this._makeTarget(4, 4, { type: hdrType, filter: THREE.LinearFilter }),
-        depthHalf: this._makeTarget(2, 2, { type: hdrType, filter: THREE.NearestFilter }),
-        aoA: this._makeTarget(2, 2, { type: ldrType, filter: THREE.NearestFilter }),
-        aoB: this._makeTarget(2, 2, { type: ldrType, filter: THREE.NearestFilter }),
+        depthHalf: this._makeTarget(2, 2, { type: ldrType, filter: THREE.NearestFilter }),
+        aoA: this._makeTarget(2, 2, { type: ldrType, filter: THREE.LinearFilter }),
+        aoB: this._makeTarget(2, 2, { type: ldrType, filter: THREE.LinearFilter }),
         volA: this._makeTarget(2, 2, { type: hdrType, filter: THREE.LinearFilter }),
         volB: this._makeTarget(2, 2, { type: hdrType, filter: THREE.LinearFilter }),
         bloomDown: [],
@@ -846,6 +900,7 @@ export class PostProcessingPipeline {
       this.passes = {
         depthHalf: this._makePass('depth-half', DEPTH_HALF_FRAG, {
           tDepth: { value: depthTex },
+          uFullTexel: { value: new THREE.Vector2(1 / 4, 1 / 4) },
           uNear: { value: 0.2 },
           uFar: { value: 450 }
         }),
@@ -854,6 +909,7 @@ export class PostProcessingPipeline {
           SSAO_FRAG,
           {
             tDepthHalf: { value: this.rt.depthHalf.texture },
+            uFar: { value: 450 },
             uTanHalf: { value: new THREE.Vector2(1, 1) },
             uTexel: { value: new THREE.Vector2(1, 1) },
             uRadius: { value: 1.15 },
@@ -872,6 +928,7 @@ export class PostProcessingPipeline {
             uShadowMatrix: { value: new THREE.Matrix4() },
             uCamWorld: { value: new THREE.Matrix4() },
             uCamPos: { value: new THREE.Vector3() },
+            uPlaneBaseY: { value: 0 },
             uTanHalf: { value: new THREE.Vector2(1, 1) },
             uSunDir: { value: this._sunDirNorm.clone() },
             uSunColor: { value: new THREE.Color('#ffd89c') },
@@ -888,6 +945,7 @@ export class PostProcessingPipeline {
         blur: this._makePass('bilateral-blur', BILATERAL_BLUR_FRAG, {
           tSrc: { value: null },
           tDepthHalf: { value: this.rt.depthHalf.texture },
+          uFar: { value: 450 },
           uDir: { value: new THREE.Vector2() },
           uDepthTol: { value: 0.06 }
         }),
@@ -918,7 +976,8 @@ export class PostProcessingPipeline {
         }),
         streak: this._makePass('streak', ANAMORPHIC_STREAK_FRAG, {
           tSrc: { value: null },
-          uStep: { value: new THREE.Vector2() }
+          uStep: { value: new THREE.Vector2() },
+          uFirstPass: { value: 1 }
         }),
         adapt: this._makePass('adapt', ADAPT_EXPOSURE_FRAG, {
           tPrev: { value: this.rt.adapt[0].texture },
@@ -979,6 +1038,10 @@ export class PostProcessingPipeline {
     this.renderer.render(this._fsScene, this._fsCam);
   }
 
+  resetExposure() {
+    this._exposureResetPending = true;
+  }
+
   setQuality(quality) {
     this.quality = quality;
     this.isMobile = detectCoarseMobile();
@@ -1011,12 +1074,18 @@ export class PostProcessingPipeline {
 
     this._aoEnabled = quality === 'high' || quality === 'ultra';
     this._volEnabled = !this.isMobile && (quality === 'high' || quality === 'ultra');
-    this._streakEnabled = quality === 'high' || quality === 'ultra';
+    // The anamorphic pass is a horizontal bloom blur. On coarse/mobile
+    // compositors it aliases into visible scanline-like bands while the
+    // camera or player is moving, especially over the high-contrast sand
+    // floor. Keep the cinematic streak on desktop, but route mobile High /
+    // Ultra through the clean grade path so bright objects retain bloom
+    // without producing motion-locked horizontal bands.
+    this._streakEnabled = !this.isMobile && (quality === 'high' || quality === 'ultra');
 
     this.passes.grade.uniforms.uFlareStrength.value =
-      quality === 'ultra' ? 0.26 : quality === 'high' ? 0.20 : 0.08;
+      quality === 'ultra' ? 0.22 : quality === 'high' ? 0.18 : 0.08;
     this.passes.final.uniforms.uSharpen.value =
-      quality === 'ultra' ? 0.32 : quality === 'high' ? 0.26 : 0.16;
+      quality === 'ultra' ? 0.24 : quality === 'high' ? 0.22 : 0.15;
   }
 
   resize(width, height, pixelRatio = this.renderer.getPixelRatio() || 1) {
@@ -1024,10 +1093,11 @@ export class PostProcessingPipeline {
     this.isMobile = detectCoarseMobile();
 
     const dpr = Math.max(1, Number(pixelRatio) || 1);
-    const effW = Math.max(8, Math.round(width * dpr));
-    const effH = Math.max(8, Math.round(height * dpr));
-    const hw = Math.max(4, Math.ceil(effW * 0.5));
-    const hh = Math.max(4, Math.ceil(effH * 0.5));
+    // Force exact even dimensions so half-res SSAO/Volumetric buffers maintain an exact 1:2 texel ratio (zero Moiré beat bands!)
+    const effW = Math.max(8, Math.round((width * dpr) * 0.5) * 2);
+    const effH = Math.max(8, Math.round((height * dpr) * 0.5) * 2);
+    const hw = Math.max(4, effW >> 1);
+    const hh = Math.max(4, effH >> 1);
 
     if (this._effW === effW && this._effH === effH) return;
     this._effW = effW;
@@ -1097,6 +1167,7 @@ export class PostProcessingPipeline {
       const halfTexelY = 1.0 / this._hh;
 
       // 2. Downsample linear depth
+      this.passes.depthHalf.uniforms.uFullTexel.value.set(1.0 / this._effW, 1.0 / this._effH);
       this.passes.depthHalf.uniforms.uNear.value = this.camera.near;
       this.passes.depthHalf.uniforms.uFar.value = this.camera.far;
       this._blit(this.passes.depthHalf, this.rt.depthHalf);
@@ -1104,12 +1175,14 @@ export class PostProcessingPipeline {
       // 3. Half-resolution SSAO + separable depth-aware bilateral blur
       if (this._aoEnabled) {
         const ssaoU = this.passes.ssao.uniforms;
+        ssaoU.uFar.value = this.camera.far;
         ssaoU.uTanHalf.value.set(tanHalfX, tanHalfY);
         ssaoU.uTexel.value.set(halfTexelX, halfTexelY);
         ssaoU.uAspect.value = aspect;
         this._blit(this.passes.ssao, this.rt.aoA);
 
         const blurU = this.passes.blur.uniforms;
+        blurU.uFar.value = this.camera.far;
         blurU.uDepthTol.value = 0.045;
         blurU.tSrc.value = this.rt.aoA.texture;
         blurU.uDir.value.set(halfTexelX, 0);
@@ -1141,6 +1214,12 @@ export class PostProcessingPipeline {
         this.camera.updateMatrixWorld();
         volU.uCamWorld.value.copy(this.camera.matrixWorld);
         volU.uCamPos.value.setFromMatrixPosition(this.camera.matrixWorld);
+        volU.uPlaneBaseY.value =
+          this.planeBaseY !== undefined
+            ? this.planeBaseY
+            : volU.uCamPos.value.y > 200.0
+              ? 420.0
+              : 0.0;
         volU.uTanHalf.value.set(tanHalfX, tanHalfY);
         volU.uFarZ.value = this.camera.far;
         volU.uSpaceBlend.value = spaceBlend;
@@ -1154,6 +1233,7 @@ export class PostProcessingPipeline {
         this._blit(this.passes.volumetric, this.rt.volA);
 
         const blurU = this.passes.blur.uniforms;
+        blurU.uFar.value = this.camera.far;
         blurU.uDepthTol.value = 0.25;
         blurU.tSrc.value = this.rt.volA.texture;
         blurU.uDir.value.set(halfTexelX, 0);
@@ -1197,13 +1277,16 @@ export class PostProcessingPipeline {
       }
 
       if (this._streakEnabled) {
-        const stTexel = 1.0 / Math.max(1, this.rt.streakA.width);
+        const stTexelX = 1.0 / Math.max(1, this.rt.streakA.width);
+        const stTexelY = 1.0 / Math.max(1, this.rt.streakA.height);
         this.passes.streak.uniforms.tSrc.value = this.rt.bloomDown[2].texture;
-        this.passes.streak.uniforms.uStep.value.set(stTexel * 1.6, 0);
+        this.passes.streak.uniforms.uFirstPass.value = 1.0;
+        this.passes.streak.uniforms.uStep.value.set(stTexelX * 1.35, stTexelY);
         this._blit(this.passes.streak, this.rt.streakA);
 
         this.passes.streak.uniforms.tSrc.value = this.rt.streakA.texture;
-        this.passes.streak.uniforms.uStep.value.set(stTexel * 4.8, 0);
+        this.passes.streak.uniforms.uFirstPass.value = 0.0;
+        this.passes.streak.uniforms.uStep.value.set(stTexelX * 3.4, 0);
         this._blit(this.passes.streak, this.rt.streakB);
       }
 
@@ -1236,10 +1319,11 @@ export class PostProcessingPipeline {
       adaptU.uSunUv.value.set(sunUvX, sunUvY);
       adaptU.uSunOn.value = sunOn;
       adaptU.uAspect.value = aspect;
-      const firstFrames = this.frameIndex <= 2;
+      const firstFrames = this.frameIndex <= 2 || this._exposureResetPending;
       adaptU.uRate.value = firstFrames ? 1.0 : 1.0 - Math.exp(-dt / 1.25);
       adaptU.uVisRate.value = firstFrames ? 1.0 : 1.0 - Math.exp(-dt / 0.12);
       this._blit(this.passes.adapt, nextAdapt);
+      this._exposureResetPending = false;
       this.adaptIndex = 1 - this.adaptIndex;
 
       // 8. ACES + AgX Hybrid Tone Mapping, Lens Glare & Cinematic Split-Tone Grade -> LDR
@@ -1247,7 +1331,7 @@ export class PostProcessingPipeline {
       gradeU.tAdapt.value = nextAdapt.texture;
       gradeU.uAspect.value = aspect;
       gradeU.uSunUv.value.set(sunUvX, sunUvY);
-      gradeU.uStreakStrength.value = this._streakEnabled ? 0.045 : 0.0;
+      gradeU.uStreakStrength.value = this._streakEnabled ? 0.024 : 0.0;
       this._blit(this.passes.grade, this.rt.ldr);
 
       // 9. Contrast-Aware Fine Detail Unsharp Mask + Luminance FXAA + Film Grain -> Screen

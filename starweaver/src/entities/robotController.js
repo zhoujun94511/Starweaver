@@ -1,9 +1,22 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { ELEVATED_PLATFORMS, getElevatedPlatformAt } from '../data/gameData.js';
+import {
+  DESERT_UPDRAFTS,
+  ELEVATED_PLATFORMS,
+  REGIONS,
+  WORLD_CONFIG,
+  getElevatedPlatformAt
+} from '../data/gameData.js';
 import { createSoftAOShadowTexture, createVisorCanvas } from '../graphics/textures.js';
 import { clamp, damp, getTerrainHeight } from '../utils/math.js';
+import { isHomeworldCollider } from '../scene/worldLifecycle.js';
 import { mergeTransformedGeometries } from '../utils/geometryBatcher.js';
+import {
+  getHomeworldGroundHeight,
+  getHomeworldElevatedPlatformAt,
+  HOMEWORLD_CONFIG,
+  HOMEWORLD_UPDRAFT_THERMALS
+} from '../data/homeworldData.js';
 
 export class RobotController {
   constructor(scene, state, sound, particles = null, pbrLibrary = null) {
@@ -12,6 +25,7 @@ export class RobotController {
     this.sound = sound;
     this.particles = particles;
     this.pbrLibrary = pbrLibrary;
+    this.worldPlane = 'desert'; // 'desert' | 'homeworld'
 
     this.group = new THREE.Group();
     this.group.name = 'robot';
@@ -44,6 +58,9 @@ export class RobotController {
     this.currentMood = 'normal';
     this._dustAccum = 0;
     this._gateBumpCooldown = 0;
+    this.aerialBoostTimer = 0;
+    this.inUpdraft = false;
+    this._goldenFlameActive = false;
     this.onGateBump = null;
     this.onChasmBump = null;
 
@@ -293,18 +310,18 @@ export class RobotController {
         }
       `,
       fragmentShader: `
+        precision mediump float;
         uniform float uStrength;
         uniform vec3 uColor;
         varying vec2 vUv;
         varying vec3 vNormalV;
         varying vec3 vViewPos;
         void main() {
-          // vUv.y = 1 at apex (visor), 0 at far base
+          // vUv.y = 1 at apex (visor), 0 at far base — hardware Early-Z friendly premultiplied additive!
           float axial = smoothstep(0.0, 0.85, vUv.y) * smoothstep(1.0, 0.82, vUv.y);
           float edgeSoft = pow(abs(dot(normalize(vNormalV), normalize(vViewPos))), 1.6);
           float a = axial * edgeSoft * uStrength * 0.24;
-          if (a < 0.003) discard;
-          gl_FragColor = vec4(uColor, a);
+          gl_FragColor = vec4(uColor * a, a);
         }
       `
     });
@@ -476,11 +493,18 @@ export class RobotController {
       ledTrim.position.set(side * 0.34, 0.06, 0.02);
       ledTrim.rotation.z = -side * 0.18;
 
-      const thrusterBell = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.075, 0.11, 0.22, 12),
+      const thrusterMount = new THREE.Mesh(
+        new RoundedBoxGeometry(0.11, 0.18, 0.14, 2, 0.03),
         chassisMat
       );
-      thrusterBell.position.set(side * 0.12, -0.18, -0.04);
+      thrusterMount.position.set(side * 0.09, -0.05, -0.02);
+      thrusterMount.rotation.z = side * 0.14;
+
+      const thrusterBell = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.075, 0.11, 0.24, 12),
+        chassisMat
+      );
+      thrusterBell.position.set(side * 0.12, -0.17, -0.04);
       thrusterBell.rotation.z = side * 0.14;
 
       // Dual-layer cyan-white jet flame plume
@@ -513,7 +537,7 @@ export class RobotController {
       plumeGroup.add(outerFlame, innerFlame);
       plumeGroup.visible = false;
 
-      wPivot.add(blade, ledTrim, thrusterBell, plumeGroup);
+      wPivot.add(blade, ledTrim, thrusterMount, thrusterBell, plumeGroup);
       this.jetpackRig.add(wPivot);
       this.jetWings.push(wPivot);
       this.jetPlumes.push(plumeGroup);
@@ -651,6 +675,7 @@ export class RobotController {
   }
 
   teleportToHubSafe() {
+    this.worldPlane = 'desert';
     this.position.set(4.8, 0, 5.8);
     this.position.y = getTerrainHeight(this.position.x, this.position.z, this.state.isBridgeExtended());
     this.vy = 0;
@@ -662,13 +687,46 @@ export class RobotController {
     this.syncPositionToMesh();
   }
 
+  teleportToHomeworldMeadow() {
+    this.worldPlane = 'homeworld';
+    const spawnY = getHomeworldGroundHeight(HOMEWORLD_CONFIG.spawnX, HOMEWORLD_CONFIG.spawnZ);
+    this.position.set(HOMEWORLD_CONFIG.spawnX, spawnY, HOMEWORLD_CONFIG.spawnZ);
+    this.vy = 0;
+    this.jetFuel = this.maxJetFuel;
+    this.isGrounded = true;
+    this.isJetpacking = false;
+    this.yaw = 0.0;
+    this._slopePitch = 0;
+    this._slopeRoll = 0;
+    this.group.rotation.set(0, 0, 0);
+    this.syncPositionToMesh(spawnY, 0);
+  }
+
+  _getHomeworldGroundY(x, z) {
+    return getHomeworldGroundHeight(x, z);
+  }
+
   getSupportHeightAt(x, z, currentY = this.position.y) {
+    if (this.worldPlane === 'homeworld') {
+      const baseHomeY = this._getHomeworldGroundY(x, z);
+      const hwPlat = getHomeworldElevatedPlatformAt(x, z, -0.06);
+      if (hwPlat && currentY >= hwPlat.topY - 0.88) {
+        return Math.max(baseHomeY, hwPlat.topY);
+      }
+      return baseHomeY;
+    }
     const baseTerrainY = getTerrainHeight(x, z, this.state.isBridgeExtended());
-    const plat = getElevatedPlatformAt(x, z, -0.12);
-    if (plat && currentY >= plat.topY - 0.65) {
+    const plat = getElevatedPlatformAt(x, z, -0.06);
+    if (plat && currentY >= plat.topY - 0.88) {
       return Math.max(baseTerrainY, plat.topY);
     }
     return baseTerrainY;
+  }
+
+  triggerAerialRingBoost(fuelGain = 38, duration = 2.0) {
+    this.jetFuel = Math.min(this.maxJetFuel, this.jetFuel + fuelGain);
+    this._jetExhausted = false;
+    this.aerialBoostTimer = Math.max(this.aerialBoostTimer, duration);
   }
 
   setIntroSleepPose(sleepFactor, moodOverride = null) {
@@ -702,15 +760,16 @@ export class RobotController {
     this.syncPositionToMesh();
   }
 
-  setNightHeadlamp(strength = 0) {
+  setNightHeadlamp(strength = 0, coneStrength = strength) {
     const s = clamp(strength, 0, 1);
+    const cs = clamp(coneStrength, 0, 1);
     if (this.headlampLight) {
       this.headlampLight.visible = s > 0.01 && this.group.visible;
       this.headlampLight.intensity = s * 3.8;
     }
     if (this.headlampCone) {
-      this.headlampCone.visible = s > 0.03 && this.group.visible;
-      this.headlampConeMat.uniforms.uStrength.value = s;
+      this.headlampCone.visible = cs > 0.03 && this.group.visible;
+      this.headlampConeMat.uniforms.uStrength.value = cs;
     }
   }
 
@@ -722,8 +781,13 @@ export class RobotController {
     if (dt > 0) {
       let targetPitch = 0;
       let targetRoll = 0;
-      const onPlat = getElevatedPlatformAt(this.position.x, this.position.z, -0.05);
-      const isFlatDeck = Boolean(onPlat && this.position.y >= onPlat.topY - 0.35);
+      const onPlat =
+        this.worldPlane === 'desert'
+          ? getElevatedPlatformAt(this.position.x, this.position.z, -0.05)
+          : null;
+      const isFlatDeck =
+        this.worldPlane === 'homeworld' ||
+        Boolean(onPlat && this.position.y >= onPlat.topY - 0.35);
 
       if (this.isGrounded && !isFlatDeck) {
         const bridgeOpen = this.state.isBridgeExtended();
@@ -803,7 +867,9 @@ export class RobotController {
       this.drillBitGroup.rotation.y += dt * (this.animMode === 'drill' ? 38.0 : 2.2);
     }
 
-    const carriedItem = this.state.getCarriedHighlightItem();
+    // Never display desert ore chunks on Milo's cargo rack while strolling the Homeworld meadow!
+    const carriedItem =
+      this.worldPlane === 'homeworld' ? null : this.state.getCarriedHighlightItem();
     if (carriedItem) {
       this.carriedMesh.visible = true;
       this.packHoloRing.visible = true;
@@ -822,14 +888,19 @@ export class RobotController {
 
     // Jetpack vertical thrust & stamina management
     const wantsFly = Boolean(!controlsLocked && moveInput.fly && hasJetpack);
-    if (this.jetFuel >= 18) {
+    if (this.jetFuel >= 12) {
       this._jetExhausted = false;
     }
     const thrusting = wantsFly && !this._jetExhausted && this.jetFuel > 0.5;
     this.isJetpacking = thrusting;
 
     let moveMag = 0;
+    let velX = 0;
+    let velZ = 0;
+    let turnDiff = 0;
     if (!controlsLocked) {
+      const prevPosX = this.position.x;
+      const prevPosZ = this.position.z;
       const ix = moveInput.x;
       const iz = moveInput.z;
       moveMag = Math.hypot(ix, iz);
@@ -850,12 +921,36 @@ export class RobotController {
         let diff = targetYaw - this.yaw;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
+        turnDiff = diff;
         this.yaw += diff * Math.min(1, dt * 12);
 
-        const onRidge = this.position.x > 20 && Math.abs(this.position.z) < 16;
-        ridgeBoost = onRidge && this.state.isRidgeSpeedBoostActive() ? 1.32 : 1.0;
-        const airBoost = !this.isGrounded ? 1.16 : 1.0;
-        const maxSpeed = 8.4 * ridgeBoost * airBoost;
+        // Declarative region speedZone + equipment passive speed modifier + sandstorm headwind drag!
+        const inHomeworld = this.worldPlane === 'homeworld';
+        ridgeBoost = this.state.getEquipmentModifier('moveSpeedMult', 1.0, 'mult');
+        if (!inHomeworld) {
+          for (const regKey in REGIONS) {
+            const reg = REGIONS[regKey];
+            const sz = reg.speedZone;
+            if (!sz) continue;
+            if (
+              this.position.x >= sz.minX &&
+              this.position.x <= sz.maxX &&
+              this.position.z >= sz.minZ &&
+              this.position.z <= sz.maxZ &&
+              (!sz.requiresMechanism || this.state.isMechanismComplete(sz.requiresMechanism))
+            ) {
+              ridgeBoost = Math.max(ridgeBoost, sz.speedMult || 1.0);
+            }
+          }
+        }
+        const stormWeight =
+          !inHomeworld && this.state.solarEnv ? this.state.solarEnv.sandstormWeight || 0 : 0;
+        const stormImmunity = this.state.getEquipmentModifier('stormDragImmunity', 0, 'max');
+        const stormDrag = stormImmunity >= 0.99 ? 1.0 : 1.0 - stormWeight * 0.16;
+        const airSpeedExtra = this.state.getEquipmentModifier('airSpeedMult', 1.0, 'max');
+        const ringMult = this.aerialBoostTimer > 0 ? 1.38 : 1.0;
+        const airBoost = !this.isGrounded ? 1.16 * airSpeedExtra * ringMult : 1.0;
+        const maxSpeed = 8.4 * ridgeBoost * stormDrag * airBoost;
         this.speed = damp(this.speed, maxSpeed * Math.min(1, moveMag), 12, dt);
 
         nextX += worldDirX * this.speed * dt;
@@ -871,14 +966,19 @@ export class RobotController {
         const bridgeOpen = this.state.isBridgeExtended();
         const allowBumpFeedback = moveMag > 0.01 || !this.isGrounded;
 
+        const inHomeworld = this.worldPlane === 'homeworld';
+        const playRadius = inHomeworld ? HOMEWORLD_CONFIG.playRadius : WORLD_CONFIG.playRadius;
         for (let iter = 0; iter < depenPasses; iter++) {
           const r = Math.hypot(nextX, nextZ);
-          if (r > 84) {
-            nextX *= 84 / r;
-            nextZ *= 84 / r;
+          if (r > playRadius) {
+            nextX *= playRadius / r;
+            nextZ *= playRadius / r;
           }
 
-          if (nextX < -38.0 && nextX > -52.0) {
+          // Keep the west bridge barrier local to the relay-gorge corridor.
+          // Without the z guard, the same x range overlaps the level-7
+          // northwest wreckage approach and traps Milo in a phantom chasm.
+          if (!inHomeworld && nextX < -38.0 && nextX > -52.0 && Math.abs(nextZ) < 11.5) {
             if (!bridgeOpen) {
               if (this.position.x >= -38.0) nextX = -38.0;
               else nextX = -52.0;
@@ -895,32 +995,44 @@ export class RobotController {
           }
 
           // Tapered frustum collision against Elevated Sky-Mesa / Basalt Pillars matching exact rock skirt!
-          for (const plat of ELEVATED_PLATFORMS) {
-            if (this.position.y < plat.topY - 0.55) {
-              const baseY = getTerrainHeight(plat.x, plat.z, false);
-              const hFrac = clamp(
-                (this.position.y - baseY) / Math.max(1.5, plat.topY - baseY),
-                0,
-                1
-              );
-              const bottomMult = plat.style === 'basalt' ? 1.24 : 1.26;
-              const effPlatRadius = plat.radius * (bottomMult + (1.02 - bottomMult) * hFrac);
+          if (!inHomeworld) {
+            for (const plat of ELEVATED_PLATFORMS) {
+              if (this.position.y < plat.topY - 0.85) {
+                const baseY = getTerrainHeight(plat.x, plat.z, false);
+                const hFrac = clamp(
+                  (this.position.y - baseY) / Math.max(1.5, plat.topY - baseY),
+                  0,
+                  1
+                );
+                const bottomMult = plat.style === 'basalt' ? 1.24 : 1.26;
+                const effPlatRadius = plat.radius * (bottomMult + (1.02 - bottomMult) * hFrac);
 
-              const dx = nextX - plat.x;
-              const dz = nextZ - plat.z;
-              const minDist = this.radius + effPlatRadius;
-              const dSq = dx * dx + dz * dz;
-              if (dSq < minDist * minDist) {
-                const d = Math.sqrt(dSq) || 0.001;
-                const push = minDist - d;
-                nextX += (dx / d) * push;
-                nextZ += (dz / d) * push;
+                const dx = nextX - plat.x;
+                const dz = nextZ - plat.z;
+                const minDist = this.radius + effPlatRadius;
+                const dSq = dx * dx + dz * dz;
+                if (dSq < minDist * minDist) {
+                  const d = Math.sqrt(dSq) || 0.001;
+                  const push = minDist - d;
+                  nextX += (dx / d) * push;
+                  nextZ += (dz / d) * push;
+                }
               }
             }
           }
 
           for (const col of colliders) {
+            const dx = nextX - col.x;
+            const minDist = this.radius + col.radius;
+            if (dx > minDist || dx < -minDist) continue;
+            const dz = nextZ - col.z;
+            if (dz > minDist || dz < -minDist) continue;
+            const dSq = dx * dx + dz * dz;
+            if (dSq >= minDist * minDist) continue;
+
             if (col.activeFn && !col.activeFn()) continue;
+            const isHwCol = isHomeworldCollider(col);
+            if (isHwCol !== inHomeworld) continue;
             const isFullHeightBarrier =
               col.id && (col.id.startsWith('gate_') || col.id.startsWith('canyon_cliff_'));
             if (!isFullHeightBarrier && col.minY !== undefined && this.position.y < col.minY) {
@@ -939,23 +1051,17 @@ export class RobotController {
               continue;
             }
 
-            const dx = nextX - col.x;
-            const dz = nextZ - col.z;
-            const minDist = this.radius + col.radius;
-            const dSq = dx * dx + dz * dz;
-            if (dSq < minDist * minDist) {
-              const d = Math.sqrt(dSq) || 0.001;
-              const push = minDist - d;
-              nextX += (dx / d) * push;
-              nextZ += (dz / d) * push;
+            const d = Math.sqrt(dSq) || 0.001;
+            const push = minDist - d;
+            nextX += (dx / d) * push;
+            nextZ += (dz / d) * push;
 
-              if (allowBumpFeedback && iter === 0 && col.id && col.id.startsWith('gate_') && this._gateBumpCooldown <= 0) {
-                this._gateBumpCooldown = 2.4;
-                this.sound.playBarrierBump();
-                if (this.onGateBump) {
-                  const baseRegion = col.id.replace(/^gate_/, '').replace(/_p[12]$/, '');
-                  this.onGateBump(baseRegion);
-                }
+            if (allowBumpFeedback && iter === 0 && col.id && col.id.startsWith('gate_') && this._gateBumpCooldown <= 0) {
+              this._gateBumpCooldown = 2.4;
+              this.sound.playBarrierBump();
+              if (this.onGateBump) {
+                const baseRegion = col.id.replace(/^gate_/, '').replace(/_p[12]$/, '');
+                this.onGateBump(baseRegion);
               }
             }
           }
@@ -980,31 +1086,65 @@ export class RobotController {
           }
         }
       }
+      if (dt > 1e-4) {
+        velX = (this.position.x - prevPosX) / dt;
+        velZ = (this.position.z - prevPosZ) / dt;
+      }
     } else {
       this.speed = 0;
     }
 
-    // Vertical Physics: Jetpack Thrust, Gentle Glide Descent, and Sky-Mesa Landing!
-    const rawTerrainY = getTerrainHeight(
-      this.position.x,
-      this.position.z,
-      this.state.isBridgeExtended()
-    );
+    // Vertical Physics: Jetpack Thrust, Gentle Glide Descent, and Sky-Mesa / Homeworld Landing!
+    const rawTerrainY =
+      this.worldPlane === 'homeworld'
+        ? this._getHomeworldGroundY(this.position.x, this.position.z)
+        : getTerrainHeight(
+            this.position.x,
+            this.position.z,
+            this.state.isBridgeExtended()
+          );
     const supportY = this.getSupportHeightAt(
       this.position.x,
       this.position.z,
       this.position.y
     );
 
+    if (this.aerialBoostTimer > 0) {
+      this.aerialBoostTimer = Math.max(0, this.aerialBoostTimer - dt);
+    }
+    this.inUpdraft = false;
+    let activeUpdraft = null;
+    if (this.worldPlane === 'homeworld' || this.state.hasEquipment('jetpack')) {
+      const updraftList =
+        this.worldPlane === 'homeworld' ? HOMEWORLD_UPDRAFT_THERMALS : DESERT_UPDRAFTS;
+      for (let i = 0; i < updraftList.length; i++) {
+        const u = updraftList[i];
+        if (Math.hypot(this.position.x - u.x, this.position.z - u.z) <= u.radius) {
+          if (this.position.y <= Math.max(rawTerrainY, 0) + u.topOffset) {
+            activeUpdraft = u;
+            this.inUpdraft = true;
+            this.jetFuel = Math.min(this.maxJetFuel, this.jetFuel + 68 * dt);
+            this._jetExhausted = false;
+            break;
+          }
+        }
+      }
+    }
+
     if (thrusting) {
       this.isGrounded = false;
-      this.jetFuel = Math.max(0, this.jetFuel - 25 * dt);
+      const fuelMult = Math.max(0.25, this.state.getEquipmentModifier('jetpackFuelMult', 1.0, 'max'));
+      if (!activeUpdraft) {
+        this.jetFuel = Math.max(0, this.jetFuel - (19.5 / fuelMult) * dt);
+      }
       if (this.jetFuel <= 0.6) {
         this._jetExhausted = true;
       }
-      const maxFlightCeiling = Math.max(rawTerrainY, 0) + 10.6;
+      const maxFlightCeiling =
+        Math.max(rawTerrainY, 0) + (activeUpdraft ? activeUpdraft.topOffset : 11.2);
+      const climbTarget = activeUpdraft ? 12.5 : 8.6;
       if (this.position.y < maxFlightCeiling) {
-        this.vy = damp(this.vy, 7.8, 9.0, dt);
+        this.vy = damp(this.vy, climbTarget, 10.5, dt);
       } else {
         this.vy = damp(this.vy, 0.0, 10.0, dt);
       }
@@ -1021,7 +1161,9 @@ export class RobotController {
             this.position.x,
             this.position.y,
             this.position.z,
-            this.yaw
+            this.yaw,
+            velX,
+            velZ
           );
         }
       }
@@ -1046,23 +1188,39 @@ export class RobotController {
     }
 
     if (this.isGrounded && this.jetFuel < this.maxJetFuel) {
-      this.jetFuel = Math.min(this.maxJetFuel, this.jetFuel + 58 * dt);
+      this.jetFuel = Math.min(this.maxJetFuel, this.jetFuel + 72 * dt);
     }
 
-    // Update Jetpack Wing Plumes & Wing Spread Angle
+    // Update Jetpack Wing Plumes & Wing Spread Angle (dynamically vector-tilted with flight velocity & steering)
     if (hasJetpack) {
+      const airSpeedNorm = !this.isGrounded ? Math.min(1, Math.hypot(velX, velZ) / 8.5) : 0;
       const wingSpread = !this.isGrounded ? 0.18 : -0.14;
+      const wingPitch = !this.isGrounded ? 0.18 * airSpeedNorm : 0;
+      const plumePitch = 0.44 * airSpeedNorm;
+      const plumeBank = !this.isGrounded ? clamp(turnDiff * 0.45, -0.35, 0.35) : 0;
       this.jetWings.forEach((w, idx) => {
         const s = idx === 0 ? -1 : 1;
         w.rotation.z = damp(w.rotation.z, s * wingSpread, 10, dt);
+        w.rotation.x = damp(w.rotation.x, wingPitch, 10, dt);
       });
       const showFlame = thrusting || (!this.isGrounded && this.vy > -4.5);
+      const goldenFlame = Boolean(this.state.cosmetics?.golden_jetflame);
+      if (this._goldenFlameActive !== goldenFlame) {
+        this._goldenFlameActive = goldenFlame;
+        const hex = goldenFlame ? 0xffd24d : 0x38f3ff;
+        for (const pl of this.jetPlumes) {
+          if (pl.material?.color) pl.material.color.setHex(hex);
+          if (pl.material?.emissive) pl.material.emissive.setHex(hex);
+        }
+      }
       const flameScale = thrusting
         ? 1.05 + Math.sin(elapsed * 38) * 0.22
         : 0.42;
       for (const pl of this.jetPlumes) {
         pl.visible = showFlame;
         pl.scale.set(1, flameScale, 1);
+        pl.rotation.x = damp(pl.rotation.x, plumePitch, 12, dt);
+        pl.rotation.z = damp(pl.rotation.z, plumeBank, 10, dt);
       }
     }
 

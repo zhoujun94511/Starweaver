@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import { REGIONS, WORLD_FACILITIES } from './data/gameData.js';
+import {
+  EQUIPMENT_DEFS,
+  LEVELS,
+  REGIONS,
+  WORLD_FACILITIES,
+  WORLD_MECHANISMS
+} from './data/gameData.js';
+import { HOMEWORLD_SCENIC_VIEWS } from './data/homeworldActivities.js';
 import { GameState } from './state/gameState.js';
 import { SoundEngine } from './audio/soundEngine.js';
 import { createPlanetEnvironments } from './graphics/environment.js';
@@ -8,20 +15,57 @@ import { ParticleSystem } from './graphics/particleSystem.js';
 import { WeatherParticles } from './graphics/weatherParticles.js';
 import { WorldBuilder } from './scene/worldBuilder.js';
 import { SpacecraftBuilder } from './scene/spacecraftBuilder.js';
+import { WorldManager, tagWorldEntries } from './scene/worldLifecycle.js';
 import { RobotController } from './entities/robotController.js';
 import { CameraController } from './scene/cameraController.js';
 import { InteractionSystem } from './systems/interactionSystem.js';
+import { HomeworldActivitySystem } from './systems/homeworldActivitySystem.js';
 import { GuidanceSystem } from './systems/guidanceSystem.js';
 import { AtmosphereSystem } from './systems/atmosphereSystem.js';
 import { HudController } from './ui/hudController.js';
 import { TouchControls } from './ui/touchControls.js';
+import { RenderActivity } from './utils/renderActivity.js';
+import {
+  applyDebugBootTarget,
+  createDebugActions,
+  parseDebugBootParams
+} from './debug/debugActions.js';
+import { DebugPanel } from './debug/debugPanel.js';
+
+function setBootSplashProgress(pct, statusText) {
+  const fill = document.getElementById('boot-splash-fill');
+  if (fill) fill.style.width = `${pct}%`;
+  const status = document.getElementById('boot-splash-status');
+  if (status && statusText) status.textContent = statusText;
+}
+
+function dismissBootSplash() {
+  const splash = document.getElementById('boot-splash');
+  if (!splash) return;
+  splash.classList.add('fade-out');
+  setTimeout(() => {
+    if (splash.parentNode) splash.parentNode.removeChild(splash);
+  }, 460);
+}
 
 class LittleBotHomeboundApp {
   constructor() {
     this.canvas = document.getElementById('game-canvas');
     this.hudRoot = document.getElementById('hud-root');
+    setBootSplashProgress(28, 'Booting Starweaver systems…');
 
     this.state = new GameState();
+    this._debugBoot = parseDebugBootParams(
+      typeof window !== 'undefined' ? window.location.search : ''
+    );
+    if (this._debugBoot.nosave) {
+      this.state.storageAvailable = false;
+    }
+    this._debugTimeScale = 1;
+    this._debugFps = 60;
+    this._debugActions = null;
+    this._debugPanel = null;
+    this._f9LastTapAt = 0;
     this.sound = new SoundEngine();
 
     this.scene = new THREE.Scene();
@@ -44,14 +88,17 @@ class LittleBotHomeboundApp {
     this.scene.environmentIntensity = 0.96;
 
     // 2. Scene Builders & Pooled Particle System (with shared GPU 1024px PBR Library)
+    setBootSplashProgress(48, 'Sculpting Kharis desert & ruins…');
     this.particles = new ParticleSystem(this.scene);
     this.world = new WorldBuilder(this.scene, this.state, this.renderer);
+    setBootSplashProgress(68, 'Assembling Starweaver hull…');
     this.spacecraft = new SpacecraftBuilder(
       this.scene,
       this.state,
       this.environments,
       this.world.skyDome,
-      this.world.pbrLibrary
+      this.world.pbrLibrary,
+      { deferHomeworld: true }
     );
     this.robot = new RobotController(
       this.scene,
@@ -85,11 +132,61 @@ class LittleBotHomeboundApp {
       weatherParticles: this.weatherParticles
     });
 
-    this.allColliders = [
+    this._desertColliders = tagWorldEntries([
       ...this.world.colliders,
       ...this.spacecraft.getColliders()
-    ];
+    ], 'desert');
+    this.allColliders = [...this._desertColliders];
     this.cameraCtrl.setOccluders(this.allColliders);
+
+    const setDesertGroupsVisible = (visible) => {
+      if (!this.world?.groups) return;
+      for (const g of Object.values(this.world.groups)) {
+        if (g) g.visible = visible;
+      }
+    };
+
+    this.worldManager = new WorldManager()
+      .register('desert', {
+        mount: () => {
+          setDesertGroupsVisible(true);
+          if (this.postProcessing) this.postProcessing.planeBaseY = 0;
+          this.allColliders.length = 0;
+          this.allColliders.push(...this._desertColliders);
+          this.cameraCtrl.setOccluders(this.allColliders);
+        },
+        unmount: () => {
+          setDesertGroupsVisible(false);
+        }
+      })
+      .register('homeworld', {
+        mount: () => {
+          const built = this.spacecraft.ensureHomeworldScene();
+          if (this.postProcessing && this.spacecraft.homeworldGroup) {
+            this.postProcessing.planeBaseY = this.spacecraft.homeworldGroup.position.y;
+          }
+          if (built) {
+            const hwCols = tagWorldEntries(this.spacecraft.getHomeworldDynamicColliders(), 'homeworld');
+            const hwOccs = tagWorldEntries(this.spacecraft.homeworldCameraOccluders, 'homeworld');
+            this.allColliders.length = 0;
+            this.allColliders.push(...this._desertColliders, ...hwCols);
+            this.cameraCtrl.setOccluders([...this.allColliders, ...hwOccs]);
+            this._registerHomeworldPlanarReflection();
+          }
+        },
+        unmount: () => {
+          const hwVisuals = this.spacecraft.homeworldActivityVisuals;
+          if (hwVisuals?.riverMesh && this.world.planarReflection?.excludedObjects) {
+            this.world.planarReflection.excludedObjects.delete(hwVisuals.riverMesh);
+          }
+          if (this.spacecraft.disposeHomeworldScene(this.renderer)) {
+            this.allColliders.length = 0;
+            this.allColliders.push(...this._desertColliders);
+            this.cameraCtrl.setOccluders(this.allColliders);
+          }
+        }
+      });
+    this.worldManager.mount('desert');
 
     if (this.world.planarReflection) {
       if (this.robot.guideRig) {
@@ -100,6 +197,7 @@ class LittleBotHomeboundApp {
       }
       this.world.planarReflection.registerExcludedObject(this.weatherParticles.sandMesh);
       this.world.planarReflection.registerExcludedObject(this.weatherParticles.starDustMesh);
+      this._registerHomeworldPlanarReflection();
     }
 
     // Automatic GPU driver safety fallback for custom PCSS shadow chunk
@@ -127,45 +225,72 @@ class LittleBotHomeboundApp {
     this.cutscene = {
       active: false,
       elapsed: 0,
-      duration: 9.2,
-      chimePlayed: false
+      flightDuration: 22.4,
+      duration: 31.2,
+      chimePlayed: false,
+      liftoffBurstPlayed: false,
+      touchdownBurstPlayed: false
     };
+    this.inHomeworldRoam = false;
+    this._desertPausedAt = null;
 
     this.hud = new HudController(this.hudRoot, this.state, this.sound, {
       onStartMission: () => {
         this.sound.ensureContext();
+        this.inHomeworldRoam = false;
+        this._desertPausedAt = null;
+        this.hud.setHomeworldRoamVisible(false);
+        this.homeworldActivities?.resetTransientState();
+        if (this.world?.desertMoteCooldowns) this.world.desertMoteCooldowns = {};
+        this.robot.aerialBoostTimer = 0;
+        this.robot.inUpdraft = false;
         this.state.resetState(true);
+        this.worldManager.switchTo('desert', {}, { unloadOthers: true });
         this.atmosphere.resetForNewMission();
         this.beginIntroCutscene();
       },
       onContinueMission: () => {
         this.sound.ensureContext();
+        this.inHomeworldRoam = false;
+    this._desertPausedAt = null;
+        this.hud.setHomeworldRoamVisible(false);
         this.state.load();
         this.atmosphere.restoreFromState();
+        const resumeOnHomeworld = Boolean(
+          this.state.launchedHome &&
+            (this.state.activeWorldPlane === 'homeworld' ||
+              (this.state.activeWorldPlane !== 'desert' && this.state.homeworldSurvey.accepted))
+        );
         if (this.state.launchedHome) {
-          // Align post-game saved continue with full sandbox exploration state
-          this.state.equipment.drill = true;
-          this.state.equipment.jetpack = true;
-          this.state.pylonsAligned.pylon_north = true;
-          this.state.pylonsAligned.pylon_south = true;
-          this.state.save();
+          this.state.syncPostGameWorldTransition(resumeOnHomeworld ? 'homeworld' : 'desert');
         }
         this.sound.setMuted(this.state.settings.muted);
         this._applyGraphicsQuality(this.state.settings.quality);
         this.cameraCtrl.clearShowcase();
-        this.spacecraft.restoreDesertPlacement(this.robot);
         this.robot.clearIntroSleepPose();
+        if (resumeOnHomeworld) {
+          this._enterHomeworldRoam();
+          this.hud.renderAll();
+          return;
+        }
+        this.spacecraft.restoreDesertPlacement(this.robot);
+        this.interaction?.resetScanCache();
+        this.guidance?.invalidateCache();
         this.atmosphere.update(0.016, this._totalElapsed, this.camera, true);
         this.cameraCtrl.snapToPose(
           this.cameraCtrl.getDesiredFollowPose(this.robot.position)
         );
+        this.hud.noteWorldFocus('desert', this.robot.position.x, this.robot.position.z);
         this.hud.setHudVisible(true);
         this.hud.renderAll();
+        const initWp = this.guidance?.resolveActiveWaypoint(this.robot.position) || null;
+        const initNear = this.interaction?.scanNearest(0) || null;
+        this.hud.updateFrame(0, initNear, null, initWp, this.robot.jetFuel);
         if (this.state.launchedHome) {
           this.hud.showToast(
             this.state.lang === 'zh'
-              ? '已进入通关自由探索模式 —— 可继续寻回日志，或前往舷梯重温返航！'
-              : 'Post-Game Free Roam Active — explore Kharis-4 or board the ramp to replay liftoff!',
+              ? '已进入通关自由探索模式 —— 可继续寻回日志，或前往舷梯返回翡翠母星！'
+              : 'Post-Game Free Roam Active — explore Kharis-4 or board the ramp to return to Homeworld!',
             'celebrate'
           );
         }
@@ -173,39 +298,112 @@ class LittleBotHomeboundApp {
       onSkipIntro: () => {
         this.finishIntroCutscene();
       },
+      onSkipLaunch: () => {
+        this.finishLaunchCutscene();
+      },
       onCloseStation: () => {
         this.cameraCtrl.clearStationFocus();
       },
       onUnstuck: () => {
+        this.keys.clear();
+        this.touchControls?.resetInputState();
+        this.cameraCtrl.clearPointers();
         this.cameraCtrl.clearShowcase();
-        this.robot.teleportToHubSafe();
+        if (this.inHomeworldRoam) {
+          this.robot.teleportToHomeworldMeadow();
+        } else {
+          this.robot.teleportToHubSafe();
+        }
+        this.cameraCtrl.snapToPose(this.cameraCtrl.getDesiredFollowPose(this.robot.position));
+        this._sceneRevision++;
       },
       onResetGame: () => {
         this.cutscene.active = false;
+        this.inHomeworldRoam = false;
+        this._desertPausedAt = null;
+        this.hud.setHomeworldRoamVisible(false);
+        this.homeworldActivities?.resetTransientState();
+        if (this.world?.desertMoteCooldowns) this.world.desertMoteCooldowns = {};
+        this.robot.aerialBoostTimer = 0;
+        this.robot.inUpdraft = false;
         this.cameraCtrl.clearShowcase();
         this.state.resetState(true);
+        this.worldManager.switchTo('desert', {}, { unloadOthers: true });
         this.atmosphere.resetForNewMission();
         this.beginIntroCutscene();
       },
       onQualityChange: (q) => {
         this._applyGraphicsQuality(q);
       },
+      onWalkHomeworld: () => {
+        this._enterHomeworldRoam();
+      },
+      onHomeworldJournal: () => {
+        this.hud.openHomeworldJournal(this.homeworldActivities);
+      },
+      onHomeworldView: () => {
+        if (!this.state.homeworldSurvey.completed) return;
+        this.hud.closeModal();
+        this._hwScenicIdx = ((this._hwScenicIdx ?? -1) + 1) % HOMEWORLD_SCENIC_VIEWS.length;
+        const v = HOMEWORLD_SCENIC_VIEWS[this._hwScenicIdx];
+        this.cameraCtrl.triggerShowcase(
+          new THREE.Vector3(v.look[0], v.look[1], v.look[2]),
+          new THREE.Vector3(v.offset[0], v.offset[1], v.offset[2]),
+          9.5
+        );
+        this.hud.showToast(this.state.text(v.title), 'celebrate');
+      },
       onReplayLaunch: () => {
+        this.inHomeworldRoam = false;
+        this.hud.setHomeworldRoamVisible(false);
         this.beginLaunchCutscene();
       },
       onFreeRoam: () => {
         this.cutscene.active = false;
-        // Ensure full sandbox access in Post-Game Free Roam!
-        this.state.equipment.drill = true;
-        this.state.equipment.jetpack = true;
-        this.state.pylonsAligned.pylon_north = true;
-        this.state.pylonsAligned.pylon_south = true;
-        this.state.save();
+        this.introCutscene.active = false;
+        this.inHomeworldRoam = false;
+        this.keys.clear();
+        this.touchControls?.resetInputState();
+        this.cameraCtrl.clearPointers();
+        this.cameraCtrl.clearShowcase();
+        this.cameraCtrl.clearStationFocus();
+        this.hud.closeModal();
+        this.homeworldActivities?.resetTransientState();
+        this.robot.aerialBoostTimer = 0;
+        this.robot.inUpdraft = false;
+        // Synchronize full post-game sandbox state & activeWorldPlane ('desert') first!
+        this.state.syncPostGameWorldTransition('desert');
+        this.worldManager.switchTo('desert', {}, { unloadOthers: true });
         this.spacecraft.restoreDesertPlacement(this.robot);
         this.robot.clearIntroSleepPose();
+        this.interaction?.resetScanCache();
+        this.guidance?.invalidateCache();
+        // Planet changes are discontinuous world-space transfers. Snap both
+        // camera state and rendered camera in the same event as the robot;
+        // damping from Y=420 reveals the square desert terrain from orbit.
+        this.cameraCtrl.yaw = 0.44;
+        this.cameraCtrl.pitch = 0.27;
+        this.cameraCtrl.distance = 11.2;
+        this.cameraCtrl.snapToPose(this.cameraCtrl.getDesiredFollowPose(this.robot.position));
         this.atmosphere.update(0.016, this._totalElapsed, this.camera, false);
+        this.world.updateShadowFollow(0, this.robot.position, this.renderer, true);
+        // Crucial: update HUD world focus ('desert' + crash_site region) BEFORE
+        // toggling Homeworld Roam off and calling renderAll() so _sceneLevelDef()
+        // and regional cargo/step indicators immediately reflect Kharis-4!
+        this.hud.noteWorldFocus('desert', this.robot.position.x, this.robot.position.z);
+        this.hud.setHomeworldRoamVisible(false);
         this.hud.setHudVisible(true);
+        if (this._desertPausedAt !== null) {
+          const awayDt = Math.max(0, (this._totalElapsed || 0) - this._desertPausedAt);
+          this._desertPausedAt = null;
+          this.state.fastForward(awayDt);
+        }
         this.hud.renderAll();
+        const desertWp = this.guidance?.resolveActiveWaypoint(this.robot.position) || null;
+        const desertNear = this.interaction?.scanNearest(0) || null;
+        this.world.update(0.016, this._totalElapsed, desertNear, desertWp, this.robot.position);
+        this.hud.updateFrame(0, desertNear, null, desertWp, this.robot.jetFuel);
+        this._sceneRevision++;
       },
       onDismissHint: () => {
         this.interaction.dismissIdleHint();
@@ -238,16 +436,14 @@ class LittleBotHomeboundApp {
       this.robot,
       this.cameraCtrl,
       {
-        openStationModal: (mode) => {
+        openStationModal: (mode, facility = null) => {
           this.sound.playModalOpen();
           const stFacility =
-            mode === 'both'
-              ? WORLD_FACILITIES.outpost_purifier
-              : mode === 'furnace'
-                ? WORLD_FACILITIES.furnace
-                : WORLD_FACILITIES.fabricator;
+            facility ||
+            WORLD_FACILITIES.stations.find((s) => s.stationKind === mode) ||
+            WORLD_FACILITIES.fabricator;
           this.cameraCtrl.setStationFocus(stFacility);
-          this.hud.openStationModal(mode);
+          this.hud.openStationModal(mode, stFacility);
         },
         openInspectModal: (title, body) => {
           this.sound.playModalOpen();
@@ -255,28 +451,77 @@ class LittleBotHomeboundApp {
         },
         showToast: (msg, style) => this.hud.showToast(msg, style),
         startLaunchSequence: () => {
+          const wasAlreadyLaunched = Boolean(this.state.launchedHome);
           const res = this.state.triggerLaunchAndCompleteGame();
           if (res.ok) {
-            this.beginLaunchCutscene();
+            if (wasAlreadyLaunched) {
+              this._enterHomeworldRoam();
+              this.hud.showToast(
+                this.state.lang === 'zh'
+                  ? '已搭乘星织号重返翡翠母星家园！'
+                  : 'Returned to Homeworld Emerald Valley aboard Starweaver!',
+                'celebrate'
+              );
+            } else {
+              this.beginLaunchCutscene();
+            }
           }
         }
       },
       this.particles
     );
 
+    this.homeworldActivities = new HomeworldActivitySystem(this.state, this.robot, this.sound, {
+      showToast: (text, style) => this.hud.showToast(text, style),
+      openInspect: (title, body) => this.hud.openInspectModal(title, body),
+      openJournal: () => this.hud.openHomeworldJournal(this.homeworldActivities),
+      openCalibration: action => this.hud.openHomeworldCalibration(action),
+      onCelebrate: (x, z, tag) => {
+        if (this.particles) {
+          this.particles.emitCelebrationSparkles(x, z, 420.2);
+        }
+        if (tag === 'completed') {
+          this.sound.playHomecomingChime();
+        }
+      }
+    });
+
     this.touchControls = new TouchControls(this.hudRoot, this.state, this.sound, {
       onPrimaryAction: () => {
-        if (!this.hud.isBlockingGameplay() && !this.cutscene.active && !this.introCutscene.active) {
+        if (this.inHomeworldRoam && !this.hud.isBlockingGameplay()) {
+          this.homeworldActivities.triggerPrimary();
+          return;
+        }
+        if (
+          !this.inHomeworldRoam &&
+          !this.hud.isBlockingGameplay() &&
+          !this.cutscene.active &&
+          !this.introCutscene.active
+        ) {
           this.interaction.triggerPrimaryInteract();
         }
       },
       onInspectAction: () => {
-        if (!this.hud.isBlockingGameplay() && !this.cutscene.active && !this.introCutscene.active) {
+        if (this.inHomeworldRoam && !this.hud.isBlockingGameplay()) {
+          this.homeworldActivities.triggerInspect();
+          return;
+        }
+        if (
+          !this.inHomeworldRoam &&
+          !this.hud.isBlockingGameplay() &&
+          !this.cutscene.active &&
+          !this.introCutscene.active
+        ) {
           this.interaction.triggerInspect();
         }
       },
       onSonarAction: () => {
-        if (!this.hud.isBlockingGameplay() && !this.cutscene.active && !this.introCutscene.active) {
+        if (
+          !this.inHomeworldRoam &&
+          !this.hud.isBlockingGameplay() &&
+          !this.cutscene.active &&
+          !this.introCutscene.active
+        ) {
           this.interaction.triggerSonarPulse();
         }
       },
@@ -303,12 +548,25 @@ class LittleBotHomeboundApp {
     }
     this._applyGraphicsQuality(this.state.settings.quality);
     this.hud.openTitleModal(hasSave);
+    if (this._debugBoot.active) {
+      this.ensureDebugPanel(false);
+      applyDebugBootTarget(this, this._debugBoot, this._debugActions);
+    }
 
     this._lastTime = performance.now();
     this._lastRenderTick = this._lastTime;
+    this._lastRafNow = this._lastTime;
+    this._smoothedRafMs = 16.67;
+    this._rafPhaseSkip = false;
+    this._renderActivity = new RenderActivity();
+    this._sceneRevision = 0;
     this._totalElapsed = 0;
     this._loop = this._loop.bind(this);
-    requestAnimationFrame(this._loop);
+    setBootSplashProgress(100, 'Welcome aboard!');
+    requestAnimationFrame((t) => {
+      this._loop(t);
+      dismissBootSplash();
+    });
   }
 
   _createRenderer(canvas) {
@@ -327,6 +585,7 @@ class LittleBotHomeboundApp {
   }
 
   _applyGraphicsQuality(quality) {
+    this._sceneRevision = (this._sceneRevision || 0) + 1;
     const w = Math.max(1, window.innerWidth);
     const h = Math.max(1, window.innerHeight);
     this.world.applyQuality(quality, this.renderer);
@@ -365,8 +624,11 @@ class LittleBotHomeboundApp {
     this.introCutscene.active = false;
     this.hud.setIntroOverlay(false);
 
+    this.state.setWorldPlane('desert', false);
     this.spacecraft.restoreDesertPlacement(this.robot);
     this.robot.clearIntroSleepPose();
+    this.interaction?.resetScanCache();
+    this.guidance?.invalidateCache();
     this.atmosphere.update(0.016, this._totalElapsed, this.camera, false);
     this.cameraCtrl.yaw = 0.44;
     this.cameraCtrl.pitch = 0.27;
@@ -377,27 +639,121 @@ class LittleBotHomeboundApp {
 
     this.state.markProgress();
     this.interaction.idleAccumSeconds = 0;
+    this.hud.noteWorldFocus('desert', this.robot.position.x, this.robot.position.z);
     this.hud.setHudVisible(true);
     this.hud.renderAll();
     this.hud.showToast(this.state.ui('miloBootToast'), 'celebrate');
     this.sound.playRobotChirp('happy');
   }
 
+  ensureDebugPanel(expand = false) {
+    if (!this._debugActions) {
+      this._debugActions = createDebugActions(this);
+      if (typeof window !== 'undefined') {
+        window.__STARWEAVER_DEBUG__ = this._debugActions;
+      }
+    }
+    if (!this._debugPanel) {
+      this._debugPanel = new DebugPanel(this.hudRoot, this._debugActions, this.state, {
+        showPillWhenCollapsed: this._debugBoot.active
+      });
+      this._debugPanel.setExpanded(false);
+    }
+    if (expand) {
+      this._debugPanel.setExpanded(true);
+    }
+    return this._debugPanel;
+  }
+
+  _registerHomeworldPlanarReflection() {
+    if (!this.world?.planarReflection) return;
+    const hwVisuals = this.spacecraft.homeworldActivityVisuals;
+    if (hwVisuals && hwVisuals.pondMesh) {
+      this.world.planarReflection.registerWaterSurface(
+        hwVisuals.pondMesh,
+        hwVisuals.waterUniforms,
+        26.0
+      );
+    }
+    if (hwVisuals && hwVisuals.riverMesh) {
+      this.world.planarReflection.registerExcludedObject(hwVisuals.riverMesh);
+    }
+  }
+
+  _ensureHomeworldReady() {
+    this.worldManager.mount('homeworld');
+  }
+
   beginLaunchCutscene() {
+    this.worldManager.mount('desert');
+    this._ensureHomeworldReady();
     this.keys.clear();
+    this.inHomeworldRoam = false;
+    this.hud.setHomeworldRoamVisible(false);
     if (this.touchControls) this.touchControls.setGameplayVisible(false);
     this.cameraCtrl.clearPointers();
     this.cameraCtrl.clearShowcase();
     this.introCutscene.active = false;
-    this.hud.setIntroOverlay(false);
     this.cameraCtrl.clearStationFocus();
 
     this.cutscene.active = true;
     this.cutscene.elapsed = 0;
     this.cutscene.chimePlayed = false;
+    this.cutscene.liftoffBurstPlayed = false;
+    this.cutscene.touchdownBurstPlayed = false;
+    this.spacecraft.prepareBoarding(this.robot);
     this.hud.closeModal();
     this.hud.setHudVisible(false);
-    this.sound.playLaunchSequence();
+    this.hud.setIntroOverlay(true, 0, this.state.ui('launchSub1'), 4, 'launch');
+    this.sound.playLaunchSequence(2.5);
+  }
+
+  finishLaunchCutscene() {
+    if (!this.cutscene.active) return;
+    this._ensureHomeworldReady();
+    this.keys.clear();
+    this.cutscene.active = false;
+    this.hud.setIntroOverlay(false);
+    this.spacecraft.applyCutsceneFrame(1.0, this._totalElapsed, this.robot);
+    this.atmosphere.applyCutsceneOverride('launch', this.camera, 1.0);
+    this.hud.openEndingModal();
+  }
+
+  _enterHomeworldRoam() {
+    if (this._desertPausedAt === null) {
+      this._desertPausedAt = this._totalElapsed || 0;
+    }
+    this.worldManager.switchTo('homeworld', {}, { unloadOthers: true });
+    this.cutscene.active = false;
+    this.introCutscene.active = false;
+    this.inHomeworldRoam = true;
+    this.keys.clear();
+    this.touchControls?.resetInputState();
+    this.cameraCtrl.clearPointers();
+    this.cameraCtrl.clearShowcase();
+    this.cameraCtrl.clearStationFocus();
+    this.hud.closeModal();
+    this.hud.setIntroOverlay(false);
+    this.state.setWorldPlane('homeworld');
+    this.spacecraft.enterHomeworldFreeRoam(this.robot);
+    this.interaction?.resetScanCache();
+    this.guidance?.invalidateCache();
+    this.atmosphere.updateHomeworld(0.016, this._totalElapsed, this.camera, true);
+    this.cameraCtrl.yaw = 0.0;
+    this.cameraCtrl.pitch = 0.25;
+    this.cameraCtrl.distance = 10.5;
+    this.cameraCtrl.snapToPose(this.cameraCtrl.getDesiredFollowPose(this.robot.position));
+    this.hud.noteWorldFocus('homeworld', this.robot.position.x, this.robot.position.z);
+    this.hud.setHudVisible(false);
+    this.hud.setHomeworldRoamVisible(true);
+    this.hud.renderAll();
+    const hwWaypoint = this.homeworldActivities?.nextObjective() || null;
+    const hwTarget = this.homeworldActivities?.scanNearest() || null;
+    if (hwWaypoint) {
+      this.hud.updateHomeworldObjective(hwWaypoint);
+    }
+    this.hud.updateFrame(0, hwTarget, null, hwWaypoint, this.robot.jetFuel);
+    this._sceneRevision++;
   }
 
   _computeAdaptiveFov(w, h) {
@@ -425,6 +781,7 @@ class LittleBotHomeboundApp {
         this.world.syncPixelRatio(this.state.settings.quality, this.renderer);
         this.renderer.setSize(w, h);
         this.postProcessing.resize(w, h, this.renderer.getPixelRatio());
+        this._sceneRevision++;
       });
     });
 
@@ -443,11 +800,17 @@ class LittleBotHomeboundApp {
         if (document.hidden) {
           this.keys.clear();
           if (this.touchControls) this.touchControls.resetInputState();
+          if (this.cameraCtrl && this.cameraCtrl.clearPointers) this.cameraCtrl.clearPointers();
           if (this.hud.activeModal !== 'title') {
             this.state.save(true);
           }
         } else {
-          this._lastTime = performance.now();
+          const now = performance.now();
+          this._sceneRevision++;
+          this._lastTime = now;
+          this._lastRafNow = now;
+          this._lastRenderTick = now;
+          this._rafPhaseSkip = false;
         }
       });
     }
@@ -455,6 +818,22 @@ class LittleBotHomeboundApp {
     window.addEventListener('keydown', (e) => {
       this.sound.ensureContext();
       const code = e.code;
+      if (code === 'F9') {
+        e.preventDefault();
+        if (this._debugPanel && this._debugPanel.expanded) {
+          this._debugPanel.setExpanded(false);
+          this._f9LastTapAt = 0;
+          return;
+        }
+        const now = performance.now();
+        if (now - this._f9LastTapAt <= 3000) {
+          this._f9LastTapAt = 0;
+          this.ensureDebugPanel(true);
+        } else {
+          this._f9LastTapAt = now;
+        }
+        return;
+      }
       this.keys.add(code);
 
       if (this.introCutscene.active) {
@@ -466,7 +845,14 @@ class LittleBotHomeboundApp {
         return;
       }
 
-      if (this.cutscene.active) return;
+      if (this.cutscene.active) {
+        if (code === 'Space' || code === 'Escape' || code === 'Enter') {
+          e.preventDefault();
+          this.keys.delete(code);
+          this.finishLaunchCutscene();
+        }
+        return;
+      }
 
       if (code === 'Escape' || code === 'KeyP') {
         if (this.hud.activeModal === 'title' || this.hud.activeModal === 'ending') return;
@@ -486,6 +872,11 @@ class LittleBotHomeboundApp {
       }
 
       if (code === 'KeyC') {
+        if (this.inHomeworldRoam) {
+          e.preventDefault();
+          if (!this.hud.isBlockingGameplay()) this.hud.openHomeworldJournal(this.homeworldActivities);
+          return;
+        }
         if (this.hud.activeModal === 'station') {
           this.hud.closeModal();
         } else if (!this.hud.isBlockingGameplay()) {
@@ -504,6 +895,28 @@ class LittleBotHomeboundApp {
         return;
       }
 
+      if (code === 'KeyU') {
+        e.preventDefault();
+        this.cameraCtrl.clearShowcase();
+        if (this.inHomeworldRoam) {
+          this.robot.teleportToHomeworldMeadow();
+        } else {
+          this.robot.teleportToHubSafe();
+        }
+        return;
+      }
+
+      if (this.inHomeworldRoam) {
+        if (code === 'KeyE') {
+          e.preventDefault();
+          this.homeworldActivities.triggerPrimary();
+        } else if (code === 'KeyF') {
+          e.preventDefault();
+          this.homeworldActivities.triggerInspect();
+        }
+        return;
+      }
+
       if (code === 'KeyV') {
         e.preventDefault();
         this.interaction.triggerSonarPulse();
@@ -513,8 +926,6 @@ class LittleBotHomeboundApp {
       } else if (code === 'KeyF') {
         e.preventDefault();
         this.interaction.triggerInspect();
-      } else if (code === 'KeyU') {
-        this.robot.teleportToHubSafe();
       }
     });
 
@@ -555,25 +966,31 @@ class LittleBotHomeboundApp {
   _loop(now) {
     requestAnimationFrame(this._loop);
 
-    // Intelligent ProMotion / High-Refresh Thermal Frame Pacer:
-    // Caps 120Hz/144Hz screens cleanly to 60 FPS during active play (~15.2ms threshold avoids 60Hz VSync beat skipping),
-    // and relaxes low-quality mobile / title / paused modals to ~45-30 FPS to slash SoC heat by >50%!
-    const isMobile = this.world.isCoarseMobileDevice();
+    // Measure native VSync RAF cadence so 60Hz/90Hz screens ALWAYS render 1:1 with zero beat-skipping,
+    // while 120Hz/144Hz ProMotion/gaming panels cleanly integer-halve (1:2 = 60/72 FPS) to save battery!
+    const rawRafDt = now - this._lastRafNow;
+    this._lastRafNow = now;
+    if (rawRafDt > 4.0 && rawRafDt < 45.0) {
+      this._smoothedRafMs += (rawRafDt - this._smoothedRafMs) * 0.12;
+    }
+
     const isIdleModal =
       this.hud.activeModal === 'pause' ||
       this.hud.activeModal === 'level_complete';
-    const isTitle = this.hud.activeModal === 'title';
-
-    let minFrameMs = 15.2; // 60 FPS cap on 120Hz/144Hz devices (never drops frames on native 60Hz!)
-    if (isIdleModal) {
-      minFrameMs = 31.5; // ~30 FPS when paused
-    } else if (isMobile && (this.state.settings.quality === 'low' || isTitle)) {
-      minFrameMs = 21.0; // ~45 FPS thermal-saver on mobile Low Quality or Title orbit
-    }
-
-    if (now - this._lastRenderTick < minFrameMs) {
+    if (!this._renderActivity.shouldRender(document.hidden, isIdleModal, this._sceneRevision, this.state.versionTick)) {
+      this._lastTime = now;
       return;
     }
+
+    if (this._smoothedRafMs < 9.5 && !isIdleModal) {
+      // True >105Hz display (e.g., 120Hz / 144Hz): integer 1:2 VSync division -> rock-solid 60Hz/72Hz!
+      this._rafPhaseSkip = !this._rafPhaseSkip;
+      if (this._rafPhaseSkip) return;
+    } else {
+      // Native 60Hz (~16.7ms) or 90Hz (~11.1ms): render every single VSync frame with ZERO jitter drops!
+      this._rafPhaseSkip = false;
+    }
+
     this._lastRenderTick = now;
     this.stepFrame(now);
   }
@@ -582,6 +999,10 @@ class LittleBotHomeboundApp {
     const dt = Math.min(0.05, Math.max(0.001, (now - this._lastTime) / 1000));
     this._lastTime = now;
     this._totalElapsed += dt;
+    this._debugFps = this._debugFps * 0.9 + (1 / Math.max(0.001, dt)) * 0.1;
+    if (this._debugPanel) {
+      this._debugPanel.update(dt);
+    }
 
     // 1. Scenic Title Screen Gentle Camera Orbit
     if (this.hud.activeModal === 'title') {
@@ -655,26 +1076,49 @@ class LittleBotHomeboundApp {
       return;
     }
 
-    // 3. Final Homecoming Launch Cutscene & Ending Meadow View
+    // 3. Final 4-Act Homecoming Launch Cutscene & Scenic Ending Meadow View
     if (this.cutscene.active || this.hud.activeModal === 'ending') {
       let t = 1;
       if (this.cutscene.active) {
         this.cutscene.elapsed += dt;
-        t = Math.min(1, this.cutscene.elapsed / this.cutscene.duration);
-        if (t >= 0.6 && !this.cutscene.chimePlayed) {
+        t = Math.min(1, this.cutscene.elapsed / this.cutscene.flightDuration);
+
+        if (t >= 0.855 && !this.cutscene.chimePlayed) {
           this.cutscene.chimePlayed = true;
           this.sound.playHomecomingChime();
         }
+
+        const actIdx = t < 0.20 ? 0 : t < 0.44 ? 1 : t < 0.58 ? 2 : 3;
+        const subKey =
+          actIdx === 0
+            ? 'launchSub1'
+            : actIdx === 1
+              ? 'launchSub2'
+              : actIdx === 2
+                ? 'launchSub3'
+                : 'launchSub4';
+        this.hud.setIntroOverlay(true, actIdx, this.state.ui(t >= 1 ? 'homecomingWelcome' : subKey), 4, 'launch');
+      } else {
+        this.hud.setIntroOverlay(false);
       }
 
       this.world.skyDome.uniforms.uTime.value = this._totalElapsed;
       this.spacecraft.update(dt, this._totalElapsed, 'launch');
       this.robot.update(dt, this._totalElapsed, this._zeroMoveVec, 0, [], true, null);
-      const camOverride = this.spacecraft.applyCutsceneFrame(
+      this.particles.update(dt, false, { ambient: t < 0.58 });
+      let camOverride = this.spacecraft.applyCutsceneFrame(
         t,
         this._totalElapsed,
-        this.robot
+        this.robot,
+        this.camera
       );
+      if (!this.cutscene.active || this.cutscene.elapsed >= this.cutscene.flightDuration) {
+        camOverride = this.spacecraft.applyHomeworldWelcomeFrame(
+          this.cutscene.active ? this.cutscene.elapsed - this.cutscene.flightDuration :
+            this.cutscene.duration - this.cutscene.flightDuration,
+          this.robot, this.camera
+        );
+      }
       this.atmosphere.applyCutsceneOverride('launch', this.camera, t);
       this.world.updateShadowFollow(
         dt,
@@ -689,10 +1133,73 @@ class LittleBotHomeboundApp {
       }
       this.postProcessing.render(dt, this._totalElapsed);
 
-      if (this.cutscene.active && t >= 1) {
+      if (this.cutscene.active && this.cutscene.elapsed >= this.cutscene.duration) {
         this.cutscene.active = false;
+        this.hud.setIntroOverlay(false);
         this.hud.openEndingModal();
       }
+      return;
+    }
+
+    // 3.5 Walkable Homeworld Emerald Meadow Free-Stroll Loop!
+    if (this.inHomeworldRoam) {
+      const blocked = this.hud.isBlockingGameplay();
+      const isHardPaused = this.hud.activeModal === 'pause';
+      const homeworldWaypoint = this.homeworldActivities.nextObjective();
+      if (this.touchControls) {
+        this.touchControls.setGameplayVisible(!blocked);
+      }
+      if (!blocked) {
+        if (this.keys.has('KeyQ')) this.cameraCtrl.rotateByKey(-1, dt);
+        if (this.keys.has('KeyR')) this.cameraCtrl.rotateByKey(1, dt);
+      }
+
+      const moveVec = this._readMoveVector();
+      this.robot.update(
+        dt,
+        this._totalElapsed,
+        moveVec,
+        this.cameraCtrl.yaw,
+        this.allColliders,
+        blocked,
+        blocked || this.state.homeworldSurvey.completed ? null : homeworldWaypoint
+      );
+      const homeworldTarget = blocked ? null : this.homeworldActivities.scanNearest();
+      if (!blocked) {
+        this.homeworldActivities.checkAerialCourse(dt);
+      }
+      if (this.touchControls && !blocked) {
+        this.touchControls.updateContext(homeworldTarget, { homeworldRoam: true });
+      }
+      this.world.skyDome.uniforms.uTime.value = this._totalElapsed;
+      this.spacecraft.skyTrialHitSet = this.homeworldActivities.skyTrialActive
+        ? this.homeworldActivities.skyTrialRingsHit
+        : null;
+      this.spacecraft.update(dt, this._totalElapsed, false);
+      this.cameraCtrl.update(dt, this.robot.position, null);
+      this.atmosphere.updateHomeworld(dt, this._totalElapsed, this.camera, isHardPaused);
+      this.world.updateShadowFollow(dt, this.robot.position, this.renderer, false);
+      if (this.world.planarReflection) {
+        this.world.planarReflection.update(this._totalElapsed, this.camera, false);
+      }
+      if (!isHardPaused) {
+        this.particles.update(dt, false, { ambient: false });
+      }
+      this.hud.noteWorldFocus('homeworld', this.robot.position.x, this.robot.position.z);
+      this.hud.updateHomeworldObjective(homeworldWaypoint);
+      const hwZh = this.state.lang === 'zh';
+      const hwAerialStatus = this.homeworldActivities.skyTrialActive
+        ? (hwZh
+            ? `⏱ 翡翠穿环竞速 ${this.homeworldActivities.skyTrialRingsHit.size}/8 · ${this.homeworldActivities.skyTrialElapsed.toFixed(1)}s`
+            : `⏱ Sky-Trial ${this.homeworldActivities.skyTrialRingsHit.size}/8 • ${this.homeworldActivities.skyTrialElapsed.toFixed(1)}s`)
+        : this.robot.inUpdraft
+          ? (hwZh ? '↑ 热气流升力 · 燃料充能中' : '↑ Thermal Updraft • Fuel Recharging')
+          : this.robot.aerialBoostTimer > 0
+            ? (hwZh ? '✦ 光子环加速中' : '✦ Photon Ring Boost')
+            : '';
+      this.hud.updateFrame(dt, homeworldTarget, null, homeworldWaypoint, this.robot.jetFuel, hwAerialStatus);
+      this.sound.updateSpatial(dt, this.robot.position, false, true);
+      this.postProcessing.render(dt, this._totalElapsed);
       return;
     }
 
@@ -711,7 +1218,7 @@ class LittleBotHomeboundApp {
     }
 
     if (!isHardPaused) {
-      this.state.update(dt);
+      this.state.update(dt * this._debugTimeScale);
     }
 
     const activeWaypoint = blocked
@@ -729,7 +1236,10 @@ class LittleBotHomeboundApp {
       activeWaypoint
     );
 
-    const nearest = blocked ? null : this.interaction.scanNearest();
+    const nearest = blocked ? null : this.interaction.scanNearest(dt);
+    if (!blocked) {
+      this.interaction.updateDesertAerialMotes(dt, this.world);
+    }
     const idleHint = blocked ? null : this.interaction.getIdleHintIfDue(dt);
 
     this.world.update(
@@ -752,7 +1262,18 @@ class LittleBotHomeboundApp {
       this.state.craftingQueue.length > 0 && !isHardPaused,
       false
     );
-    this.hud.updateFrame(dt, nearest, idleHint, activeWaypoint, this.robot.jetFuel);
+    this.hud.noteWorldFocus(this.robot.worldPlane, this.robot.position.x, this.robot.position.z);
+    const dZh = this.state.lang === 'zh';
+    const dAerialStatus = this.state.sonarResonanceTimer > 0
+      ? (dZh
+          ? `⚡ 声呐谐振暴击 ${this.state.sonarResonanceTimer.toFixed(1)}s`
+          : `⚡ Sonar Resonance ${this.state.sonarResonanceTimer.toFixed(1)}s`)
+      : this.robot.inUpdraft
+        ? (dZh ? '↑ 热气流升力 · 燃料充能中' : '↑ Thermal Updraft • Fuel Recharging')
+        : this.robot.aerialBoostTimer > 0
+          ? (dZh ? '✦ 空中星尘加速中' : '✦ Sky-Mote Boost')
+          : '';
+    this.hud.updateFrame(dt, nearest, idleHint, activeWaypoint, this.robot.jetFuel, dAerialStatus);
     if (this.touchControls && !blocked) {
       this.touchControls.updateContext(nearest);
     }
@@ -765,5 +1286,9 @@ class LittleBotHomeboundApp {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  window.__LBH_APP__ = new LittleBotHomeboundApp();
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.__LBH_APP__ = new LittleBotHomeboundApp();
+    });
+  });
 });

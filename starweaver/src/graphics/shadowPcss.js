@@ -44,35 +44,46 @@ export function installPcssShadows({
     return r * vec2( cos( th ), sin( th ) );
   }
 
+  float swSampleShadowDepth( sampler2D shadowMap, vec2 uv ) {
+    #if __VERSION__ >= 300
+      return unpackRGBAToDepth( textureLod( shadowMap, uv, 0.0 ) );
+    #else
+      return unpackRGBAToDepth( texture2D( shadowMap, uv ) );
+    #endif
+  }
+
   float getShadow( sampler2D shadowMap, vec2 shadowMapSize, float shadowIntensity, float shadowBias, float shadowRadius, vec4 shadowCoord ) {
     shadowCoord.xyz /= shadowCoord.w;
     vec3 sc = shadowCoord.xyz;
+    // Compute screen-space derivatives before any branch so ANGLE/HLSL never flags X3595
+    vec3 dx = dFdx( sc );
+    vec3 dy = dFdy( sc );
     bool inFrustum = sc.x >= 0.0 && sc.x <= 1.0 && sc.y >= 0.0 && sc.y <= 1.0;
     if ( ! ( inFrustum && sc.z <= 1.0 && sc.z >= 0.0 ) ) return 1.0;
 
     // Receiver-plane depth gradient bias to prevent acne on curved hull & dunes without peter-panning
-    vec3 dx = dFdx( sc );
-    vec3 dy = dFdy( sc );
     float det = dx.x * dy.y - dx.y * dy.x;
     vec2 dz = vec2( 0.0 );
     if ( abs( det ) > 1e-12 ) {
       dz = vec2( dy.y * dx.z - dx.y * dy.z, dx.x * dy.z - dy.x * dx.z ) / det;
     }
     vec2 texel = 1.0 / shadowMapSize;
-    float maxSlope = 0.0026 / max( texel.x, texel.y );
+    float maxSlope = 0.0032 / max( texel.x, texel.y );
     dz = clamp( dz, vec2( -maxSlope ), vec2( maxSlope ) );
-    float zr = sc.z + shadowBias - ( abs( dz.x ) * texel.x + abs( dz.y ) * texel.y ) * 0.32;
+    float baseTexelBias = max( texel.x, texel.y ) * 0.78;
+    float zr = sc.z + shadowBias - ( abs( dz.x ) * texel.x + abs( dz.y ) * texel.y ) * 0.92 - baseTexelBias;
 
     float phi = swShadowIGN( gl_FragCoord.xy ) * 6.2831853;
 
-    // 1. Blocker search in world-scaled UV radius
-    vec2 searchR = ( 0.62 * max( shadowRadius, 0.8 ) ) / SW_SHADOW_FRUSTUM;
+    // 1. Blocker search in world-scaled UV radius (with radial cone-bias protection on curved dunes/meadows)
+    vec2 searchR = ( 0.52 * max( shadowRadius, 0.8 ) ) / SW_SHADOW_FRUSTUM;
     float blkSum = 0.0;
     float blkCount = 0.0;
     for ( int i = 0; i < ${blockerTaps}; i ++ ) {
       vec2 o = swVogelDisk( i, ${blockerTaps}, phi ) * searchR;
-      float d = unpackRGBAToDepth( texture2D( shadowMap, sc.xy + o ) );
-      float zTest = zr + dot( o, dz );
+      float d = swSampleShadowDepth( shadowMap, sc.xy + o );
+      float coneGuard = length( o ) * 0.16;
+      float zTest = zr + dot( o, dz ) - coneGuard;
       if ( d < zTest ) {
         blkSum += d;
         blkCount += 1.0;
@@ -84,14 +95,15 @@ export function installPcssShadows({
     // 2. Contact-hardening penumbra size proportional to blocker distance
     float avgBlocker = blkSum / blkCount;
     float blockerDistM = max( zr - avgBlocker, 0.0 ) * SW_SHADOW_DEPTH;
-    float penumbraM = clamp( blockerDistM * 0.026 * max( shadowRadius, 0.8 ), 0.015, 0.68 );
-    vec2 filterR = max( vec2( penumbraM ) / SW_SHADOW_FRUSTUM, texel * 1.25 );
+    float penumbraM = clamp( blockerDistM * 0.025 * max( shadowRadius, 0.8 ), 0.016, 0.62 );
+    vec2 filterR = max( vec2( penumbraM ) / SW_SHADOW_FRUSTUM, texel * 1.35 );
 
     float lit = 0.0;
     for ( int i = 0; i < ${taps}; i ++ ) {
       vec2 o = swVogelDisk( i, ${taps}, phi + 1.71 ) * filterR;
-      float d = unpackRGBAToDepth( texture2D( shadowMap, sc.xy + o ) );
-      lit += step( zr + dot( o, dz ), d );
+      float d = swSampleShadowDepth( shadowMap, sc.xy + o );
+      float zRef = zr + dot( o, dz ) - length( o ) * 0.11;
+      lit += smoothstep( zRef - 0.00045, zRef + 0.00025, d );
     }
     lit /= float( ${taps} );
 

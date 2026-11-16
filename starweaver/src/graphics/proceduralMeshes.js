@@ -24,8 +24,16 @@ export function createStratifiedMesaGeometry(
   bottomRadius = 13,
   height = 22,
   seed = 101,
-  tightSilhouette = false
+  tightSilhouette = false,
+  buriedBaseOverride = null
 ) {
+  // Horizon/canyon mesas are intentionally sunk into the procedural terrain.
+  // The terrain can dip several metres across a wide cliff footprint; leaving
+  // the stock cylinder cap at y=0 exposes a dark underside through those dips
+  // (the visible "floating/clipping" seam).  Extend only the non-climbable
+  // silhouettes below the ground while keeping the plateau top unchanged.
+  const buriedBaseDepth =
+    buriedBaseOverride !== null ? buriedBaseOverride : tightSilhouette ? 0 : 3.5;
   const radialSegs = 56;
   const heightSegs = 28;
   const baseGeo = new THREE.CylinderGeometry(
@@ -122,6 +130,14 @@ export function createStratifiedMesaGeometry(
       const capNoise = fbm2D(ox, oz, 2);
       pos.setY(i, y + (capNoise - 0.4) * height * 0.05);
       tmp.copy(cCapRock);
+    }
+
+    if (buriedBaseDepth > 0) {
+      // Preserve the cap and skyline while tapering the buried extension into
+      // the lower third of the wall so no hard horizontal cut is introduced.
+      const buryWeight = Math.pow(1 - hNorm, 1.35);
+      y -= buriedBaseDepth * buryWeight;
+      pos.setY(i, y);
     }
 
     colors[i * 3] = tmp.r;

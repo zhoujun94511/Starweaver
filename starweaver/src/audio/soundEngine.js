@@ -298,7 +298,8 @@ export class SoundEngine {
   }
 
   playCraftStart(station = 'furnace') {
-    if (station === 'furnace') {
+    const isThermal = station === 'furnace' || station === 'thermal';
+    if (isThermal) {
       this._noiseBurst(0.18, 480, 0.09, 0);
       this._tone(180, 330, 0.28, 'sawtooth', 0.11, 0);
       this._tone(360, 540, 0.24, 'triangle', 0.13, 0.08);
@@ -332,14 +333,14 @@ export class SoundEngine {
     });
   }
 
-  playLaunchSequence() {
+  playLaunchSequence(ignitionDelay = 0) {
     if (!this.ensureContext()) return;
-    this._noiseBurst(2.2, 220, 0.16, 0);
-    this._tone(65, 145, 2.4, 'sawtooth', 0.2, 0);
-    this._tone(110, 220, 2.4, 'triangle', 0.18, 0.2);
+    this._noiseBurst(2.2, 220, 0.16, ignitionDelay);
+    this._tone(65, 145, 2.4, 'sawtooth', 0.2, ignitionDelay);
+    this._tone(110, 220, 2.4, 'triangle', 0.18, ignitionDelay + 0.2);
     const fanfare = [523.25, 659.25, 783.99, 1046.5, 1318.5];
     fanfare.forEach((n, idx) => {
-      this._tone(n, n, 0.48, 'sine', 0.2, 0.9 + idx * 0.22);
+      this._tone(n, n, 0.48, 'sine', 0.2, ignitionDelay + 0.9 + idx * 0.22);
     });
   }
 

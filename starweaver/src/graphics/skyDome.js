@@ -35,7 +35,7 @@ export const SKY_PALETTES = {
 
 export const KHARIS_PLANET_DIR = new THREE.Vector3(-0.55, 0.22, -0.805).normalize();
 
-export function createSkyDome() {
+export function createSkyDome({ isMobile = false } = {}) {
   const group = new THREE.Group();
   group.name = 'atmospheric-sky';
 
@@ -46,6 +46,7 @@ export function createSkyDome() {
     uNightFactor: { value: 0.0 }, // 0.0 = bright day, 0.5 = twilight, 1.0 = starry galactic night
     uCloudCoverage: { value: 0.48 }, // 0.35 = clear, 0.86 = overcast
     uDustVeil: { value: 0.0 }, // 0.0 = calm, 1.0 = peak desert sandstorm
+    uMobileFast: { value: isMobile ? 1.0 : 0.0 },
     uZenithColor: { value: new THREE.Color(pal.zenith) },
     uMidSkyColor: { value: new THREE.Color(pal.midSky) },
     uHorizonColor: { value: new THREE.Color(pal.horizonSun) },
@@ -86,6 +87,7 @@ export function createSkyDome() {
       uniform float uNightFactor;
       uniform float uCloudCoverage;
       uniform float uDustVeil;
+      uniform float uMobileFast;
       uniform vec3 uZenithColor;
       uniform vec3 uMidSkyColor;
       uniform vec3 uHorizonColor;
@@ -327,7 +329,7 @@ export function createSkyDome() {
         float y = clamp(d.y, -1.0, 1.0);
         float h = max(y, 0.0);
 
-        float nightK = clamp(uNightFactor, 0.0, 1.0) * (1.0 - uIsHomeworld);
+        float nightK = clamp(uNightFactor, 0.0, 1.0);
         float dayK = 1.0 - nightK;
         float dustK = clamp(uDustVeil, 0.0, 1.0) * (1.0 - uIsHomeworld) * (1.0 - uSpaceBlend);
 
@@ -375,8 +377,8 @@ export function createSkyDome() {
 
         vec3 skyCol = mix(daySky, nightSky, nightK);
 
-        // Composite Colossal Ringed Planet (faintly veiled in daytime blue sky, blazing crisp at night!)
-        if (kharisMask > 0.01 && y > -0.02) {
+        // Composite Colossal Ringed Planet (faintly veiled in daytime blue sky, blazing crisp at sunset/night!)
+        if ((1.0 - uSpaceBlend) > 0.01 && (kharisMask > 0.01 || nightK > 0.05) && y > -0.02) {
           vec3 planetSunDir = normalize(vec3(0.62, 0.38, 0.68));
           vec4 planet = evalGiantRingedPlanet(d, uPlanetDir, planetSunDir, uTime);
           if (planet.a > 0.001) {
@@ -393,17 +395,19 @@ export function createSkyDome() {
           }
         }
 
-        // 3. Weather-Driven Self-Shadowing Cloud Deck (Clear -> Overcast)
-        if (y > 0.015 && uSpaceBlend < 0.98) {
+        // 3. Weather-Driven Self-Shadowing Cloud Deck (skip costly cloud FBM when choked by dense sandstorm on mobile!)
+        if (y > 0.015 && uSpaceBlend < 0.98 && (uMobileFast < 0.5 || dustK < 0.78)) {
           vec2 cuv = d.xz / (h + 0.13) * vec2(0.72, 1.05);
           float windSpeed = mix(1.0, 3.2, dustK);
           vec2 wind = vec2(0.0075, 0.0028) * uTime * windSpeed;
           vec2 q = cuv + wind;
-          float warp = fbm4(q * 0.48 + 4.3);
+          float warp = uMobileFast > 0.5 ? noise(q * 0.55 + 4.3) : fbm4(q * 0.48 + 4.3);
           vec2 qq = q + (warp - 0.5) * 1.05;
 
-          float dens = fbm5(qq);
-          float ridge = 1.0 - abs(2.0 * fbm4(qq * 2.7 + 8.1) - 1.0);
+          float dens = uMobileFast > 0.5 ? fbm4(qq) : fbm5(qq);
+          float ridge = uMobileFast > 0.5
+            ? 0.5
+            : 1.0 - abs(2.0 * fbm4(qq * 2.7 + 8.1) - 1.0);
           dens = dens * 0.84 + (ridge - 0.5) * 0.16 * smoothstep(0.03, 0.28, h);
 
           float covLow = mix(0.62, 0.24, clamp(uCloudCoverage, 0.0, 1.0));
@@ -413,7 +417,7 @@ export function createSkyDome() {
           cov *= smoothstep(0.015, 0.16, h) * (1.0 - uSpaceBlend);
 
           vec2 sunStep = normalize(sunD.xz + vec2(1e-5)) * 0.20;
-          float densSun = fbm5(qq + sunStep);
+          float densSun = uMobileFast > 0.5 ? fbm4(qq + sunStep) : fbm5(qq + sunStep);
           float relief = clamp((dens - densSun) * 4.2 + 0.52, 0.0, 1.0);
           float thick = smoothstep(0.45, 0.82, dens);
 
@@ -442,9 +446,15 @@ export function createSkyDome() {
         float twinDisc = smoothstep(0.99972, 0.99991, twinMu) * smoothstep(-0.02, 0.05, twinD.y);
         skyCol += vec3(1.0, 0.72, 0.55) * twinDisc * 6.5 * directMask * kharisMask;
 
-        // 5. Atmospheric Sandstorm Billowing Dust Wall Veil
+        // 5. Atmospheric Sandstorm Billowing Dust Wall Veil (fast trig-free 2-tap noise on mobile!)
         if (dustK > 0.005) {
-          float stormSwirl = fbm4(vec2(atan(d.z, d.x) * 3.0 - uTime * 0.18, y * 4.5 - uTime * 0.05));
+          float stormSwirl;
+          if (uMobileFast > 0.5) {
+            vec2 sp = d.xz * 2.6 + vec2(-uTime * 0.22, y * 3.8 - uTime * 0.06);
+            stormSwirl = noise(sp) * 0.65 + noise(sp * 2.1 + 4.7) * 0.35;
+          } else {
+            stormSwirl = fbm4(vec2(atan(d.z, d.x) * 3.0 - uTime * 0.18, y * 4.5 - uTime * 0.05));
+          }
           vec3 dayDustCol = mix(vec3(0.86, 0.56, 0.32), vec3(0.96, 0.72, 0.46), pow(azSun, 2.0));
           vec3 nightDustCol = vec3(0.14, 0.095, 0.075);
           vec3 stormCol = mix(dayDustCol, nightDustCol, nightK) * (0.86 + 0.24 * stormSwirl);

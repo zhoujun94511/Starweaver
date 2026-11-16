@@ -1,12 +1,17 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import {
+  BRINE_POOLS,
   CREW_LOGS,
+  DESERT_AERIAL_MOTES,
+  DESERT_UPDRAFTS,
   ELEVATED_PLATFORMS,
   MATERIALS,
   REGIONS,
   RESOURCE_NODES,
-  WORLD_FACILITIES
+  WORLD_CONFIG,
+  WORLD_FACILITIES,
+  getMaterialVisualArchetype
 } from '../data/gameData.js';
 import {
   createFloatingBadgeTexture,
@@ -23,6 +28,9 @@ import { bakeGpuPbrLibrary, applyWorldWeathering } from '../graphics/gpuMaterial
 import { installPcssShadows, uninstallPcssShadows } from '../graphics/shadowPcss.js';
 import { PlanarReflectionSystem } from '../graphics/planarReflection.js';
 import { createSkyDome } from '../graphics/skyDome.js';
+import { buildUpdraftVisuals, updateUpdraftVisuals } from './updraftVisuals.js';
+import { buildDesertStations } from './worldStationsBuilder.js';
+import { buildRelayBridgeAndPylons, buildOutpostAndVentLandmarks, buildMothershipWreckageAndDrones } from './worldLandmarksBuilder.js';
 import {
   createAlienAgaveGeometry,
   createBasaltClusterGeometry,
@@ -64,6 +72,9 @@ export class WorldBuilder {
     this.gateBarriers = new Map();
     this.pylonVisuals = new Map();
     this.cairnVisuals = new Map();
+    this.beaconVisuals = new Map();
+    this.droneBayGroup = null;
+    this.droneAgents = [];
     this.logVisuals = new Map();
     this.bridgeMesh = null;
     this.bridgeUniforms = null;
@@ -136,7 +147,7 @@ export class WorldBuilder {
 
     this.planarReflection = renderer ? new PlanarReflectionSystem(renderer, scene) : null;
 
-    this.skyDome = createSkyDome();
+    this.skyDome = createSkyDome({ isMobile: this.isCoarseMobileDevice() });
     this.scene.add(this.skyDome.group);
 
     this._setupLightingAndSky();
@@ -144,6 +155,7 @@ export class WorldBuilder {
     this._buildBrinePools();
     this._buildDistantHorizonMesas();
     this._buildElevatedSkyPlatforms();
+    this._buildDesertUpdraftsAndMotes();
     this._buildInstancedScenery();
     this._buildStations();
     this._buildRegionRoutesAndSignposts();
@@ -184,8 +196,8 @@ export class WorldBuilder {
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
     this.sunLight.shadow.camera.bottom = -d;
-    this.sunLight.shadow.bias = -0.00028;
-    this.sunLight.shadow.normalBias = 0.022;
+    this.sunLight.shadow.bias = -0.00042;
+    this.sunLight.shadow.normalBias = 0.028;
     this.sunLight.shadow.radius = 1.15;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
@@ -214,18 +226,31 @@ export class WorldBuilder {
     const nativeDpr =
       typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
     const isMobile = this.isCoarseMobileDevice();
+    const cssW = typeof window !== 'undefined' ? Math.max(1, window.innerWidth || 1280) : 1280;
+    const cssH = typeof window !== 'undefined' ? Math.max(1, window.innerHeight || 720) : 720;
+    const cssArea = cssW * cssH;
 
-    // Mobile 2.0x DPR on 390-430px screens = ~780x1688 (exceeds 326 PPI true Retina threshold!)
-    // while cutting pixel fill & thermal dissipation by 36% compared to 2.5x!
+    // Enforce adaptive pixel-area ceiling so 2K/4K/Retina displays in Ultra stay razor-sharp
+    // without exploding 21-pass post-processing fillrate into 8M-10M pixels!
+    let targetDpr = 1.0;
+    let maxPixels = Infinity;
     if (quality === 'low') {
-      renderer.setPixelRatio(1.0);
+      targetDpr = 1.0;
     } else if (quality === 'medium') {
-      renderer.setPixelRatio(Math.min(nativeDpr, isMobile ? 1.45 : 1.5));
+      targetDpr = Math.min(nativeDpr, isMobile ? 1.45 : 1.5);
+      maxPixels = isMobile ? 1150000 : 2400000;
     } else if (quality === 'ultra') {
-      renderer.setPixelRatio(Math.min(nativeDpr, isMobile ? 2.0 : 2.5));
+      targetDpr = Math.min(nativeDpr, isMobile ? 1.9 : 2.0);
+      maxPixels = isMobile ? 1650000 : 4200000;
     } else {
-      renderer.setPixelRatio(Math.min(nativeDpr, isMobile ? 1.85 : 2.0));
+      targetDpr = Math.min(nativeDpr, isMobile ? 1.75 : 1.85);
+      maxPixels = isMobile ? 1450000 : 3200000;
     }
+
+    if (cssArea * targetDpr * targetDpr > maxPixels) {
+      targetDpr = Math.max(1.0, Math.sqrt(maxPixels / cssArea));
+    }
+    renderer.setPixelRatio(Math.round(targetDpr * 20) / 20);
   }
 
   markShadowDirty() {
@@ -286,6 +311,10 @@ export class WorldBuilder {
       renderer.shadowMap.enabled = false;
       renderer.shadowMap.autoUpdate = false;
       this.sunLight.castShadow = false;
+      if (this.sunLight.shadow.map) {
+        this.sunLight.shadow.map.dispose();
+        this.sunLight.shadow.map = null;
+      }
       if (this.dustPoints) this.dustPoints.visible = false;
     } else if (quality === 'medium') {
       renderer.shadowMap.enabled = true;
@@ -304,7 +333,8 @@ export class WorldBuilder {
       renderer.shadowMap.autoUpdate = false;
       renderer.shadowMap.type = isMobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
       this.sunLight.castShadow = true;
-      const hiMap = isMobile ? 1024 : quality === 'ultra' ? 3072 : 2048;
+      // Power-of-two 2048px atlas over tight 72m frustum = 3.5cm/texel precision without NPOT 3072px bandwidth bloat or PCSS slope-bias shrinkage
+      const hiMap = isMobile ? 1024 : 2048;
       this.sunLight.shadow.mapSize.set(hiMap, hiMap);
       if (this.sunLight.shadow.map) {
         this.sunLight.shadow.map.dispose();
@@ -404,8 +434,8 @@ export class WorldBuilder {
   }
 
   _buildTerrain() {
-    const size = 230;
-    const segs = 256;
+    const size = WORLD_CONFIG.terrainSize;
+    const segs = WORLD_CONFIG.terrainSegs;
     const geo = new THREE.PlaneGeometry(size, size, segs, segs);
     geo.rotateX(-Math.PI / 2);
 
@@ -419,6 +449,8 @@ export class WorldBuilder {
     const cGorge = new THREE.Color('#9c86a3');
     const cBasalt = new THREE.Color('#66566b');
     const cChasm = new THREE.Color('#2b2030');
+    const cSaltPan = new THREE.Color('#e6f4f7');
+    const cSaltShore = new THREE.Color('#cbe2e8');
     const tmp = new THREE.Color();
 
     for (let i = 0; i < pos.count; i++) {
@@ -431,18 +463,31 @@ export class WorldBuilder {
       const macroPatch = fbm2D(x * 0.022 + 5.1, z * 0.022 - 8.4, 3);
       tmp.copy(cSand).lerp(cCrest, clamp((y + 0.5) / 3.5, 0, 0.55));
       tmp.multiplyScalar(0.88 + macroPatch * 0.22);
-      if (x > 20) {
-        tmp.lerp(cRidge, smoothstep(20, 48, x));
+      if (x > 20 && z < 18) {
+        tmp.lerp(cRidge, smoothstep(20, 48, x) * smoothstep(18, 6, z));
       }
-      if (z > 20) {
-        tmp.lerp(cCanyon, smoothstep(20, 44, z));
+      if (z > 20 && x < 24) {
+        tmp.lerp(cCanyon, smoothstep(20, 44, z) * smoothstep(24, 10, x));
       }
-      if (x < -20) {
-        tmp.lerp(cGorge, smoothstep(-20, -45, x));
+      if (x < -20 && z > -22) {
+        tmp.lerp(cGorge, smoothstep(-20, -45, x) * smoothstep(-22, -8, z));
         if (y < -2.0) tmp.lerp(cChasm, clamp((-y - 2) / 6, 0, 1));
       }
-      if (z < -20) {
-        tmp.lerp(cBasalt, smoothstep(-20, -45, z));
+      if (z < -20 && x > -22) {
+        tmp.lerp(cBasalt, smoothstep(-20, -45, z) * smoothstep(-22, -8, x));
+      }
+      if (x > 16 && z > 16) {
+        const rSalt = Math.hypot(x - 58.0, z - 58.0);
+        const shoreBlend = smoothstep(32.0, 21.0, rSalt);
+        const coreBlend = smoothstep(19.5, 11.0, rSalt);
+        tmp.lerp(cSaltShore, shoreBlend * 0.85);
+        tmp.lerp(cSaltPan, coreBlend * 0.92);
+      }
+      if (x < -16 && z < -16) {
+        const rWreck = Math.hypot(x + 56.0, z + 56.0);
+        const scorchBlend = smoothstep(30.0, 14.0, rWreck);
+        tmp.lerp(cBasalt, scorchBlend * 0.78);
+        if (rWreck < 18.0) tmp.lerp(cChasm, smoothstep(18.0, 8.0, rWreck) * 0.35);
       }
 
       colors[i * 3] = tmp.r;
@@ -489,12 +534,16 @@ export class WorldBuilder {
           '#include <map_fragment>',
           `
           float terSlope = smoothstep(0.10, 0.42, 1.0 - clamp(normalize(vTerWorldNrm).y, 0.0, 1.0));
+          vec2 sandWarp = vec2(
+            sin(vTerWorldPos.z * 0.085 + vTerWorldPos.x * 0.031),
+            cos(vTerWorldPos.x * 0.079 - vTerWorldPos.z * 0.037)
+          ) * 0.14;
           #ifdef USE_MAP
-            vec2 uvA = vMapUv;
-            vec2 uvB = mat2(0.80, -0.60, 0.60, 0.80) * (vMapUv * 0.37) + vec2(0.17, 0.43);
+            vec2 uvA = mat2(0.966, 0.259, -0.259, 0.966) * vMapUv + sandWarp;
+            vec2 uvB = mat2(0.766, -0.643, 0.643, 0.766) * (vMapUv * 0.39) + vec2(0.17, 0.43) - sandWarp * 0.5;
             vec4 sampA = texture2D(map, uvA);
             vec4 sampB = texture2D(map, uvB);
-            vec4 sandCol = mix(sampA, sampB, 0.46);
+            vec4 sandCol = mix(sampA, sampB, 0.48);
             vec4 rockCol = texture2D(uRockMap, vTerWorldPos.xz * 0.14);
             diffuseColor *= mix(sandCol, rockCol, terSlope * 0.85);
           #endif
@@ -507,11 +556,15 @@ export class WorldBuilder {
             '#include <normal_fragment_maps>',
             `
             #ifdef USE_NORMALMAP_TANGENTSPACE
-              vec2 nUvA = vNormalMapUv;
-              vec2 nUvB = mat2(0.80, -0.60, 0.60, 0.80) * (vNormalMapUv * 0.37) + vec2(0.17, 0.43);
+              vec2 nWarp = vec2(
+                sin(vTerWorldPos.z * 0.085 + vTerWorldPos.x * 0.031),
+                cos(vTerWorldPos.x * 0.079 - vTerWorldPos.z * 0.037)
+              ) * 0.14;
+              vec2 nUvA = mat2(0.966, 0.259, -0.259, 0.966) * vNormalMapUv + nWarp;
+              vec2 nUvB = mat2(0.766, -0.643, 0.643, 0.766) * (vNormalMapUv * 0.39) + vec2(0.17, 0.43) - nWarp * 0.5;
               vec3 mapN1 = texture2D(normalMap, nUvA).xyz * 2.0 - 1.0;
               vec3 mapN2 = texture2D(normalMap, nUvB).xyz * 2.0 - 1.0;
-              vec3 sandN = normalize(mix(mapN1, mapN2, 0.46));
+              vec3 sandN = normalize(mix(mapN1, mapN2, 0.48));
               vec3 rockN = texture2D(uRockNormal, vTerWorldPos.xz * 0.14).xyz * 2.0 - 1.0;
               vec3 mapN = normalize(mix(sandN, rockN, terSlope * 0.85));
               mapN.xy *= normalScale;
@@ -542,37 +595,23 @@ export class WorldBuilder {
   _buildBrinePools() {
     if (!this.planarReflection) return;
 
-    // 1. Central Crash Basin Crystalline Coolant & Groundwater Seep Pool (front-port of Starweaver)
-    // Walkable shallow mirror seep (0.025m) reflecting Starweaver hull, cockpit, Fabricator & Kharis clouds!
-    const hubPool = this.planarReflection.createBrinePool({
-      x: -4.45,
-      y: getTerrainHeight(-4.45, 7.65, false) + 0.026,
-      z: 7.65,
-      radiusX: 3.65,
-      radiusZ: 2.75,
-      rotationY: 0.34,
-      tintDeep: '#0d3648',
-      tintRim: '#32c8dc',
-      sandColor: '#bd7f54',
-      normalMap: this.textures.sandNormal
-    });
-    this.groups.static.add(hubPool);
-
-    // 2. South Dry Canyon Endothermic Brine Pool (matching Botanist Lin's log & region lore!)
-    const canyonY = getTerrainHeight(-2.2, 38.5, false) + 0.04;
-    const canyonPool = this.planarReflection.createBrinePool({
-      x: -2.2,
-      y: canyonY,
-      z: 38.5,
-      radiusX: 4.5,
-      radiusZ: 3.45,
-      rotationY: -0.22,
-      tintDeep: '#0a423e',
-      tintRim: '#3ef2c8',
-      sandColor: '#9e543d',
-      normalMap: this.textures.sandNormal
-    });
-    this.groups.static.add(canyonPool);
+    // Declaratively instantiate all planar-reflected brine & crystalline salt mirror pools from BRINE_POOLS
+    for (const cfg of BRINE_POOLS) {
+      const py = getTerrainHeight(cfg.x, cfg.z, false) + (cfg.heightOffset || 0.03);
+      const poolMesh = this.planarReflection.createBrinePool({
+        x: cfg.x,
+        y: py,
+        z: cfg.z,
+        radiusX: cfg.radiusX,
+        radiusZ: cfg.radiusZ,
+        rotationY: cfg.rotationY || 0,
+        tintDeep: cfg.tintDeep,
+        tintRim: cfg.tintRim,
+        sandColor: cfg.sandColor,
+        normalMap: this.textures.sandNormal
+      });
+      this.groups.static.add(poolMesh);
+    }
   }
 
   _buildDistantHorizonMesas() {
@@ -594,20 +633,22 @@ export class WorldBuilder {
     );
 
     // Pre-sculpt 5 distinct geological mesa archetypes to share cleanly across horizon & canyon walls
+    const mesaBottomRadii = [13.5, 16.2, 11.4, 17.8, 12.8];
     const mesaArchetypes = [
-      createStratifiedMesaGeometry(6.2, 13.5, 22, 101),
-      createStratifiedMesaGeometry(8.5, 16.2, 18, 202),
-      createStratifiedMesaGeometry(4.8, 11.4, 27, 303),
-      createStratifiedMesaGeometry(9.4, 17.8, 24, 404),
-      createStratifiedMesaGeometry(5.6, 12.8, 20, 505)
+      createStratifiedMesaGeometry(6.2, mesaBottomRadii[0], 22, 101),
+      createStratifiedMesaGeometry(8.5, mesaBottomRadii[1], 18, 202),
+      createStratifiedMesaGeometry(4.8, mesaBottomRadii[2], 27, 303),
+      createStratifiedMesaGeometry(9.4, mesaBottomRadii[3], 24, 404),
+      createStratifiedMesaGeometry(5.6, mesaBottomRadii[4], 20, 505)
     ];
 
-    // Outer 360° horizon ring of multi-tiered buttes & spires — Instanced by archetype (48 meshes -> 5 draw calls!)
+    // Outer 360° horizon ring of multi-tiered buttes & spires — pushed outside WORLD_CONFIG.boundaryRiseInner
     const horizonBuckets = mesaArchetypes.map(() => []);
     const count = 32;
+    const minHorizonDist = WORLD_CONFIG.boundaryRiseInner + 6;
     for (let i = 0; i < count; i++) {
       const a = (i / count) * Math.PI * 2 + (rand() - 0.5) * 0.1;
-      const dist = 92 + rand() * 34;
+      const dist = minHorizonDist + rand() * 34;
       const mx = Math.cos(a) * dist;
       const mz = Math.sin(a) * dist;
       const archIdx = i % mesaArchetypes.length;
@@ -655,37 +696,82 @@ export class WorldBuilder {
       this.groups.static.add(inst);
     });
 
-    // 2. Mid-ground Sculpted Canyon Cliff Walls + 2 Sandstone Archways — Merged into 1 static shadow-casting Mesh!
+    // Sculpted Canyon Cliff Walls use a tighter silhouette + buried skirt so they never jut 15m+ into playable corridors
+    const canyonBottomRadii = [9.8, 10.6, 9.0, 11.2, 9.4];
+    const canyonArchetypes = [
+      createStratifiedMesaGeometry(5.2, canyonBottomRadii[0], 20, 101, true, 3.5),
+      createStratifiedMesaGeometry(6.2, canyonBottomRadii[1], 18, 202, true, 3.5),
+      createStratifiedMesaGeometry(4.4, canyonBottomRadii[2], 24, 303, true, 3.5),
+      createStratifiedMesaGeometry(6.8, canyonBottomRadii[3], 22, 404, true, 3.5),
+      createStratifiedMesaGeometry(4.8, canyonBottomRadii[4], 19, 505, true, 3.5)
+    ];
+
+    // 2. Mid-ground Sculpted Canyon Cliff Walls + 3 Sandstone Archways — Merged into 1 static shadow-casting Mesh!
     const canyonWalls = [
       // South Dry Canyon left & right red-rock walls (corridor x in [-12, 12] stays wide open)
       { x: -23.5, z: 34.0, sx: 0.72, sy: 0.58, sz: 0.95, rot: 0.4, archIdx: 0 },
-      { x: 23.5, z: 36.5, sx: 0.75, sy: 0.62, sz: 0.92, rot: 2.1, archIdx: 1 },
+      { x: 25.0, z: 38.0, sx: 0.72, sy: 0.62, sz: 0.80, rot: 2.1, archIdx: 1 },
       { x: -24.5, z: 51.0, sx: 0.82, sy: 0.68, sz: 1.05, rot: 1.3, archIdx: 2 },
       { x: 24.0, z: 53.5, sx: 0.78, sy: 0.64, sz: 0.98, rot: 3.8, archIdx: 3 },
       // East Whispering Ridge scenic canyon bluffs (corridor z in [-10, 10] stays wide open)
       { x: 38.0, z: -21.5, sx: 0.72, sy: 0.56, sz: 0.78, rot: 0.9, archIdx: 4 },
-      { x: 52.0, z: 22.0, sx: 0.76, sy: 0.62, sz: 0.82, rot: 2.6, archIdx: 0 }
+      { x: 52.0, z: 22.0, sx: 0.76, sy: 0.62, sz: 0.82, rot: 2.6, archIdx: 0 },
+      // Southeast Saltstone Pass flank ridges (sealing gate_salt_flats flanks while keeping diagonal highway wide open)
+      { x: 31.4, z: 16.6, sx: 0.67, sy: 0.60, sz: 0.67, rot: 0.78, archIdx: 0 },
+      { x: 42.2, z: 19.2, sx: 0.68, sy: 0.58, sz: 0.68, rot: 1.4, archIdx: 2 },
+      { x: 64.5, z: 25.5, sx: 0.80, sy: 0.66, sz: 0.80, rot: 0.5, archIdx: 4 },
+      { x: 78.5, z: 32.5, sx: 0.88, sy: 0.72, sz: 0.88, rot: 1.9, archIdx: 3 },
+      { x: 92.0, z: 40.5, sx: 0.92, sy: 0.76, sz: 0.92, rot: 2.7, archIdx: 1 },
+      { x: 16.6, z: 31.4, sx: 0.62, sy: 0.60, sz: 0.62, rot: 2.35, archIdx: 1 },
+      { x: 28.5, z: 68.5, sx: 0.84, sy: 0.68, sz: 0.84, rot: 1.1, archIdx: 0 },
+      { x: 35.5, z: 83.5, sx: 0.90, sy: 0.74, sz: 0.90, rot: 2.8, archIdx: 2 },
+      // Northwest Mothership Pass flank ridges (sealing gate_mothership_graveyard flanks cleanly!)
+      { x: -31.4, z: -16.6, sx: 0.72, sy: 0.60, sz: 0.72, rot: 0.9, archIdx: 2 },
+      { x: -16.6, z: -31.4, sx: 0.55, sy: 0.60, sz: 0.55, rot: 2.4, archIdx: 3 },
+      { x: -42.5, z: -21.5, sx: 0.70, sy: 0.58, sz: 0.70, rot: 1.7, archIdx: 4 },
+      { x: -21.5, z: -42.5, sx: 0.70, sy: 0.58, sz: 0.70, rot: 0.3, archIdx: 1 }
     ];
     const shadowMesaEntries = [];
     for (const cw of canyonWalls) {
+      const geo = canyonArchetypes[cw.archIdx];
       const wy = getTerrainHeight(cw.x, cw.z, false) - 1.4;
       shadowMesaEntries.push({
-        geo: mesaArchetypes[cw.archIdx],
+        geo,
         position: [cw.x, wy, cw.z],
         rotation: [0, cw.rot, 0],
         scale: [cw.sx, cw.sy, cw.sz]
       });
+      // Derive collider radius directly from the actual ground-band vertices of the sculpted cliff
+      // so the player can never walk underneath an uncollided rock skirt.
+      const pos = geo.attributes.position;
+      const cosR = Math.cos(cw.rot);
+      const sinR = Math.sin(cw.rot);
+      let cliffRadius = canyonBottomRadii[cw.archIdx] * Math.max(cw.sx, cw.sz);
+      let maxGroundR = 0;
+      for (let vi = 0; vi < pos.count; vi++) {
+        const lx = pos.getX(vi) * cw.sx;
+        const ly = pos.getY(vi) * cw.sy;
+        const lz = pos.getZ(vi) * cw.sz;
+        const wx = cw.x + lx * cosR + lz * sinR;
+        const wz = cw.z - lx * sinR + lz * cosR;
+        const gy = getTerrainHeight(wx, wz, false);
+        if (wy + ly >= gy - 0.5 && wy + ly <= gy + 3.0) {
+          const r = Math.hypot(wx - cw.x, wz - cw.z);
+          if (r > maxGroundR) maxGroundR = r;
+        }
+      }
+      if (maxGroundR > 0) cliffRadius = maxGroundR + 0.05;
       this.colliders.push({
         id: `canyon_cliff_${cw.x}_${cw.z}`,
         x: cw.x,
         z: cw.z,
-        radius: 9.2 * Math.max(cw.sx, cw.sz),
+        radius: cliffRadius,
         maxY: 24.0,
         occluder: true
       });
     }
 
-    // 3. Dramatic Natural Wind-Carved Sandstone Archways spanning East & South Route Gateways!
+    // 3. Dramatic Natural Wind-Carved Sandstone Archways spanning East, South & Southeast Route Gateways!
     const eastArchGeo = createSandstoneArchGeometry(15.2, 8.6, 2.0, 811);
     const eastY = getTerrainHeight(26.5, 0, false);
     shadowMesaEntries.push({
@@ -693,7 +779,6 @@ export class WorldBuilder {
       position: [26.5, eastY - 0.5, 0],
       rotation: [0, Math.PI / 2, 0]
     });
-    // Arch pier colliders at z = ±7.6 (middle corridor z in [-5, 5] is completely open!)
     this.colliders.push(
       { id: 'east_arch_pier_n', x: 26.5, z: -7.6, radius: 2.05, maxY: eastY + 8.5, occluder: true },
       { id: 'east_arch_pier_s', x: 26.5, z: 7.6, radius: 2.05, maxY: eastY + 8.5, occluder: true }
@@ -710,14 +795,74 @@ export class WorldBuilder {
       { id: 'south_arch_pier_e', x: 8.0, z: 27.5, radius: 2.1, maxY: southY + 9.0, occluder: true }
     );
 
+    const seArchGeo = createSandstoneArchGeometry(16.0, 9.0, 2.05, 955);
+    const seY = getTerrainHeight(28.5, 28.5, false);
+    const seYaw = Math.PI / 4;
+    const seOff = 8.0 * Math.SQRT1_2;
+    shadowMesaEntries.push({
+      geo: seArchGeo,
+      position: [28.5, seY - 0.5, 28.5],
+      rotation: [0, seYaw, 0]
+    });
+    this.colliders.push(
+      { id: 'se_arch_pier_ne', x: 28.5 + seOff, z: 28.5 - seOff, radius: 2.05, maxY: seY + 8.8, occluder: true },
+      { id: 'se_arch_pier_sw', x: 28.5 - seOff, z: 28.5 + seOff, radius: 2.05, maxY: seY + 8.8, occluder: true }
+    );
+
     const mergedCanyonAndArches = mergeTransformedGeometries(shadowMesaEntries);
     eastArchGeo.dispose();
     southArchGeo.dispose();
+    seArchGeo.dispose();
+    for (const g of canyonArchetypes) g.dispose();
     if (mergedCanyonAndArches) {
       const cliffBatchMesh = new THREE.Mesh(mergedCanyonAndArches, mesaMat);
       cliffBatchMesh.castShadow = true;
       cliffBatchMesh.receiveShadow = true;
       this.groups.static.add(cliffBatchMesh);
+    }
+  }
+
+  _buildDesertUpdraftsAndMotes() {
+    this.desertAerialMotes = [];
+    this.desertMoteCooldowns = {};
+    this.desertUpdraftGroup = new THREE.Group();
+    this.desertUpdraftGroup.name = 'desert-updrafts-group';
+    this.desertUpdraftGroup.visible = this.state.hasEquipment('jetpack');
+    this.groups.effects.add(this.desertUpdraftGroup);
+
+    this.desertUpdraftRings = buildUpdraftVisuals(
+      this.desertUpdraftGroup,
+      DESERT_UPDRAFTS,
+      (x, z) => getTerrainHeight(x, z, false),
+      { prefix: 'desert-updraft', ringRadius: 1.75, beamHeight: 17 }
+    );
+
+    this.desertMotesGroup = new THREE.Group();
+    this.desertMotesGroup.name = 'desert-aerial-motes-group';
+    this.desertMotesGroup.visible = this.state.hasEquipment('jetpack');
+    this.groups.effects.add(this.desertMotesGroup);
+
+    const moteCoreGeo = new THREE.OctahedronGeometry(0.46, 0);
+    const moteHaloGeo = new THREE.TorusGeometry(0.72, 0.05, 6, 18);
+    moteHaloGeo.rotateX(Math.PI / 2);
+    for (let i = 0; i < DESERT_AERIAL_MOTES.length; i++) {
+      const m = DESERT_AERIAL_MOTES[i];
+      const baseY = getTerrainHeight(m.x, m.z, false) + m.yOffset;
+      const g = new THREE.Group();
+      g.position.set(m.x, baseY, m.z);
+      const coreMat = new THREE.MeshStandardMaterial({
+        color: m.color || '#78ffd6',
+        emissive: m.color || '#78ffd6',
+        emissiveIntensity: 1.5,
+        roughness: 0.2,
+        metalness: 0.35
+      });
+      const core = new THREE.Mesh(moteCoreGeo, coreMat);
+      const halo = new THREE.Mesh(moteHaloGeo, coreMat);
+      g.add(core, halo);
+      g.name = `desert-aerial-mote-${m.id}`;
+      this.desertMotesGroup.add(g);
+      this.desertAerialMotes.push({ def: m, group: g, halo, baseY, phase: i * 0.7 });
     }
   }
 
@@ -892,25 +1037,45 @@ export class WorldBuilder {
     const buckets = [[], [], []];
     const floraPlacements = [];
 
+    // Declarative route corridor & basin clear-zone test (automatically protects all REGIONS, nodes, stations & logs!)
+    const isProtectedSceneryZone = (px, pz) => {
+      if (px < -37 && px > -53) return true;
+      for (const reg of Object.values(REGIONS)) {
+        if (Array.isArray(reg.clearZones)) {
+          for (const cz of reg.clearZones) {
+            if (Math.hypot(px - cz.x, pz - cz.z) < cz.radius) return true;
+          }
+        }
+        if (reg.corridor) {
+          const [ax, az] = reg.corridor.from;
+          const [bx, bz] = reg.corridor.to;
+          const abx = bx - ax;
+          const abz = bz - az;
+          const lenSq = abx * abx + abz * abz || 1;
+          const t = clamp(((px - ax) * abx + (pz - az) * abz) / lenSq, 0, 1);
+          const distSeg = Math.hypot(px - (ax + abx * t), pz - (az + abz * t));
+          if (distSeg < (reg.corridor.halfWidth || 5.6)) return true;
+        }
+      }
+      for (const n of RESOURCE_NODES) {
+        if (Math.hypot(px - n.x, pz - n.z) < 3.8) return true;
+      }
+      for (const st of WORLD_FACILITIES.stations) {
+        if (Math.hypot(px - st.x, pz - st.z) < 4.5) return true;
+      }
+      for (const log of Object.values(CREW_LOGS)) {
+        if (Math.hypot(px - log.position.x, pz - log.position.z) < 3.6) return true;
+      }
+      return false;
+    };
+
     for (let i = 0; i < 165; i++) {
       const angle = rand() * Math.PI * 2;
       const dist = 16 + rand() * 70;
       const x = Math.cos(angle) * dist;
       const z = Math.sin(angle) * dist;
 
-      if (Math.hypot(x, z) < 15.5) continue;
-      if (Math.abs(z) < 5.6 && Math.abs(x) < 76) continue;
-      if (Math.abs(x) < 5.6 && Math.abs(z) < 72) continue;
-      if (x < -37 && x > -53) continue;
-
-      let nearNode = false;
-      for (const n of RESOURCE_NODES) {
-        if (Math.hypot(x - n.x, z - n.z) < 3.8) {
-          nearNode = true;
-          break;
-        }
-      }
-      if (nearNode) continue;
+      if (isProtectedSceneryZone(x, z)) continue;
 
       const scaleXZ = 0.8 + rand() * 1.65;
       const scaleY = 0.65 + rand() * 1.45;
@@ -1001,451 +1166,17 @@ export class WorldBuilder {
   }
 
   _buildStations() {
-    const steelMat = applyWorldWeathering(
-      new THREE.MeshStandardMaterial({
-        map: this.textures.metalMap,
-        aoMap: this.textures.metalOrm,
-        aoMapIntensity: 0.95,
-        roughnessMap: this.textures.metalOrm,
-        metalnessMap: this.textures.metalOrm,
-        normalMap: this.textures.metalNormal,
-        normalScale: new THREE.Vector2(0.85, 0.85),
-        color: '#8899b0',
-        roughness: 1.0,
-        metalness: 0.85
-      }),
-      { dustAmount: 0.18, macroContrast: 0.10, groundSkirt: 0.35, keyTag: 'station_steel_v2' }
-    );
-    const darkIronMat = applyWorldWeathering(
-      new THREE.MeshStandardMaterial({
-        map: this.textures.titaniumMap || null,
-        aoMap: this.textures.titaniumOrm || null,
-        aoMapIntensity: 0.9,
-        roughnessMap: this.textures.titaniumOrm || null,
-        metalnessMap: this.textures.titaniumOrm || null,
-        normalMap: this.textures.titaniumNormal || null,
-        color: this.textures.titaniumMap ? '#ffffff' : '#262f3d',
-        roughness: this.textures.titaniumOrm ? 1.0 : 0.5,
-        metalness: this.textures.titaniumOrm ? 1.0 : 0.72
-      }),
-      { dustAmount: 0.22, macroContrast: 0.08, groundSkirt: 0.4, keyTag: 'station_iron_v2' }
-    );
-    const copperMat = new THREE.MeshStandardMaterial({
-      map: this.textures.copperMap || null,
-      aoMap: this.textures.copperOrm || null,
-      roughnessMap: this.textures.copperOrm || null,
-      metalnessMap: this.textures.copperOrm || null,
-      normalMap: this.textures.copperNormal || null,
-      color: this.textures.copperMap ? '#ffffff' : '#de8142',
-      roughness: this.textures.copperOrm ? 1.0 : 0.26,
-      metalness: this.textures.copperOrm ? 1.0 : 0.85
-    });
-    const deckPlateMat = applyWorldWeathering(
-      new THREE.MeshStandardMaterial({
-        map: this.textures.deckMap || this.textures.metalMap,
-        aoMap: this.textures.deckOrm || null,
-        roughnessMap: this.textures.deckOrm || null,
-        metalnessMap: this.textures.deckOrm || null,
-        normalMap: this.textures.deckNormal || this.textures.metalNormal,
-        color: this.textures.deckMap ? '#ffffff' : '#4a5568',
-        roughness: this.textures.deckOrm ? 1.0 : 0.48,
-        metalness: this.textures.deckOrm ? 1.0 : 0.78
-      }),
-      { dustAmount: 0.32, macroContrast: 0.1, groundSkirt: 0.5, keyTag: 'station_deck_v2' }
-    );
-
-    // 1. Detailed Solar Smelting Furnace (East-side of Hub)
-    const fCfg = WORLD_FACILITIES.furnace;
-    const fGroup = new THREE.Group();
-    const fy = getTerrainHeight(fCfg.x, fCfg.z, false);
-    fGroup.position.set(fCfg.x, fy, fCfg.z);
-
-    this._staticAoEntries.push({
-      w: 4.6,
-      h: 4.6,
-      x: fCfg.x,
-      y: fy + 0.03,
-      z: fCfg.z
-    });
-
-    const fIronGeos = [];
-    const plinthGeo = new THREE.CylinderGeometry(1.62, 1.82, 0.38, 16);
-    const hearthGeo = new RoundedBoxGeometry(1.05, 0.92, 0.42, 3, 0.08);
-    fIronGeos.push(plinthGeo, hearthGeo);
-    const mergedFurnaceIron = mergeTransformedGeometries([
-      { geo: plinthGeo, position: [0, 0.19, 0] },
-      { geo: hearthGeo, position: [0, 1.08, 0.85] }
-    ]);
-    for (const g of fIronGeos) g.dispose();
-    if (mergedFurnaceIron) {
-      const fIronMesh = new THREE.Mesh(mergedFurnaceIron, darkIronMat);
-      fIronMesh.castShadow = true;
-      fIronMesh.receiveShadow = true;
-      fGroup.add(fIronMesh);
-    }
-
-    // Kiln chamber with armor ribs
-    const kiln = new THREE.Mesh(new THREE.CylinderGeometry(1.06, 1.28, 1.72, 16), steelMat);
-    kiln.position.y = 1.22;
-    kiln.castShadow = true;
-    fGroup.add(kiln);
-
-    const bandGeo = new THREE.TorusGeometry(1.18, 0.065, 10, 24);
-    const pipeGeo = new THREE.CylinderGeometry(0.11, 0.11, 1.35, 10);
-    const chimneyGeo = new THREE.CylinderGeometry(0.38, 0.52, 1.05, 14);
-    const mergedFurnaceCopper = mergeTransformedGeometries([
-      { geo: bandGeo, position: [0, 0.72, 0], rotation: [Math.PI / 2, 0, 0] },
-      { geo: bandGeo, position: [0, 1.68, 0], rotation: [Math.PI / 2, 0, 0] },
-      { geo: pipeGeo, position: [-1.18, 1.2, -0.1] },
-      { geo: pipeGeo, position: [1.18, 1.2, -0.1] },
-      { geo: chimneyGeo, position: [0, 2.52, -0.15] }
-    ]);
-    bandGeo.dispose();
-    pipeGeo.dispose();
-    chimneyGeo.dispose();
-    if (mergedFurnaceCopper) {
-      const copperMesh = new THREE.Mesh(mergedFurnaceCopper, copperMat);
-      copperMesh.castShadow = true;
-      fGroup.add(copperMesh);
-    }
-
-    // Parabolic gold solar concentrator mirror on articulated strut
-    const mirrorPts = [
-      new THREE.Vector2(0.01, 0),
-      new THREE.Vector2(0.48, 0.08),
-      new THREE.Vector2(0.95, 0.3)
-    ];
-    const mirrorDish = new THREE.Mesh(
-      new THREE.LatheGeometry(mirrorPts, 24),
-      new THREE.MeshStandardMaterial({
-        color: '#ffdb7d',
-        roughness: 0.14,
-        metalness: 0.92,
-        side: THREE.DoubleSide
-      })
-    );
-    mirrorDish.position.set(-0.42, 2.95, 0.25);
-    mirrorDish.rotation.set(0.62, 0, -0.42);
-    fGroup.add(mirrorDish);
-
-    this.furnaceCoreMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.44, 18, 14),
-      new THREE.MeshStandardMaterial({
-        color: '#ffb84d',
-        emissive: '#ff6f00',
-        emissiveIntensity: 2.4,
-        roughness: 0.2
-      })
-    );
-    this.furnaceCoreMesh.position.set(0, 1.08, 0.92);
-    fGroup.add(this.furnaceCoreMesh);
-
-    this.furnaceLight = new THREE.PointLight('#ff8c2b', 2.4, 9.5);
-    this.furnaceLight.position.set(0, 1.25, 1.45);
-    fGroup.add(this.furnaceLight);
-
-    // Industrial diamond-tread operator deck + riveted thermal hazard plaque on Solar Furnace
-    const fDeck = new THREE.Mesh(
-      new THREE.CylinderGeometry(2.15, 2.28, 0.08, 24),
-      deckPlateMat
-    );
-    fDeck.position.y = 0.04;
-    fDeck.receiveShadow = true;
-    fGroup.add(fDeck);
-
-    const fPlateTex = createIndustrialSpecPlateTexture({
-      header: 'SOLAR CRUCIBLE',
-      code: 'UNIT SC-1420 · KHARIS',
-      specA: 'CORE TEMP: 1,420 C',
-      specB: 'CAUTION: MOLTEN SLAG',
-      accent: '#ffad3b'
-    });
-    const fPlate = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.68, 0.40),
-      new THREE.MeshStandardMaterial({
-        map: fPlateTex,
-        roughness: 0.42,
-        metalness: 0.65,
-        polygonOffset: true,
-        polygonOffsetFactor: -2
-      })
-    );
-    fPlate.position.set(0.88, 1.18, 0.84);
-    fPlate.rotation.y = 0.68;
-    fGroup.add(fPlate);
-
-    // Floating holographic Station Name Badge above Solar Furnace!
-    const furnaceBadgeTex = createFloatingBadgeTexture('太阳能熔炼炉', '原矿 → 铁板/铜锭/透镜', '#ffad42');
-    const furnaceBadgeMat = new THREE.SpriteMaterial({
-      map: furnaceBadgeTex,
-      transparent: true,
-      depthTest: true
-    });
-    const furnaceBadge = new THREE.Sprite(furnaceBadgeMat);
-    furnaceBadge.position.set(0, 4.15, 0);
-    furnaceBadge.scale.set(3.4, 1.02, 1);
-    fGroup.add(furnaceBadge);
-    this.stationBadges.push({
-      sprite: furnaceBadge,
-      mat: furnaceBadgeMat,
-      tex: furnaceBadgeTex,
-      x: fCfg.x,
-      z: fCfg.z,
-      baseW: 3.4,
-      baseH: 1.02,
-      zh: ['🔥 太阳能熔炼炉', '原矿 → 铁板 / 紫铜锭 / 透镜'],
-      en: ['🔥 Solar Furnace', 'Smelt Raw Ore → Plates & Ingots']
-    });
-
-    this.groups.dynamic.add(fGroup);
-    this.colliders.push({ id: 'furnace', x: fCfg.x, z: fCfg.z, radius: fCfg.radius });
-
-    // 2. Precision Fabrication Station (West-side of Hub)
-    const fabCfg = WORLD_FACILITIES.fabricator;
-    const fabGroup = new THREE.Group();
-    const fabY = getTerrainHeight(fabCfg.x, fabCfg.z, false);
-    fabGroup.position.set(fabCfg.x, fabY, fabCfg.z);
-
-    this._staticAoEntries.push({
-      w: 4.8,
-      h: 3.8,
-      x: fabCfg.x,
-      y: fabY + 0.03,
-      z: fabCfg.z
-    });
-
-    const bench = new THREE.Mesh(
-      new RoundedBoxGeometry(2.6, 0.96, 1.85, 4, 0.1),
-      steelMat
-    );
-    bench.position.y = 0.48;
-    bench.castShadow = true;
-    bench.receiveShadow = true;
-    fabGroup.add(bench);
-
-    // Holographic build plate with concentric glowing rings
-    const holoBase = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.74, 0.82, 0.1, 24),
-      darkIronMat
-    );
-    holoBase.position.set(0.15, 1.0, 0.1);
-    const holoPad = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.62, 0.62, 0.13, 24),
-      new THREE.MeshStandardMaterial({
-        color: '#66f0ff',
-        emissive: '#00a8e8',
-        emissiveIntensity: 2.0,
-        roughness: 0.18
-      })
-    );
-    holoPad.position.set(0.15, 1.02, 0.1);
-    fabGroup.add(holoBase, holoPad);
-
-    // Slanted operator display terminal on side of bench
-    const sideConsole = new THREE.Mesh(
-      new RoundedBoxGeometry(0.55, 0.42, 0.12, 3, 0.04),
-      new THREE.MeshStandardMaterial({
-        color: '#6cf5ff',
-        emissive: '#0c8ab8',
-        emissiveIntensity: 1.5
-      })
-    );
-    sideConsole.position.set(-0.92, 1.25, 0.48);
-    sideConsole.rotation.x = -0.55;
-    fabGroup.add(sideConsole);
-
-    // Articulated robotic assembly arm + fabrication laser beam
-    this.fabricatorArm = new THREE.Group();
-    this.fabricatorArm.position.set(-0.68, 0.96, -0.45);
-    const post = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.14, 0.18, 1.25, 12),
-      new THREE.MeshStandardMaterial({ color: '#3b88b8', metalness: 0.7, roughness: 0.3 })
-    );
-    post.position.y = 0.6;
-    const joint = new THREE.Mesh(new THREE.SphereGeometry(0.18, 12, 10), copperMat);
-    joint.position.y = 1.18;
-    const boom = new THREE.Mesh(
-      new RoundedBoxGeometry(1.12, 0.16, 0.2, 3, 0.04),
-      steelMat
-    );
-    boom.position.set(0.46, 1.18, 0.25);
-    const emitterHead = new THREE.Mesh(
-      new THREE.ConeGeometry(0.13, 0.28, 12),
-      new THREE.MeshStandardMaterial({
-        color: '#75f7ff',
-        emissive: '#00ccff',
-        emissiveIntensity: 2.2
-      })
-    );
-    emitterHead.position.set(0.86, 0.96, 0.25);
-    emitterHead.rotation.x = Math.PI;
-
-    this.fabricatorLaser = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.025, 0.06, 0.85, 8),
-      new THREE.MeshBasicMaterial({
-        color: '#70f8ff',
-        transparent: true,
-        opacity: 0.85
-      })
-    );
-    this.fabricatorLaser.position.set(0.86, 0.48, 0.25);
-    this.fabricatorLaser.visible = false;
-
-    this.fabricatorArm.add(post, joint, boom, emitterHead, this.fabricatorLaser);
-    fabGroup.add(this.fabricatorArm);
-
-    // Industrial diamond-tread platform + CAD spec plaque + cyan holographic fill light
-    const fabDeck = new THREE.Mesh(
-      new RoundedBoxGeometry(3.25, 0.08, 2.55, 2, 0.03),
-      deckPlateMat
-    );
-    fabDeck.position.y = 0.04;
-    fabDeck.receiveShadow = true;
-    fabGroup.add(fabDeck);
-
-    const fabPlateTex = createIndustrialSpecPlateTexture({
-      header: 'PRECISION GANTRY',
-      code: 'UNIT FAB-02 · LASER CAD',
-      specA: 'TOLERANCE: 0.005 MM',
-      specB: 'CLASS-IV PHOTONIC BEAM',
-      accent: '#4ee8ff'
-    });
-    const fabPlate = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.76, 0.44),
-      new THREE.MeshStandardMaterial({
-        map: fabPlateTex,
-        roughness: 0.4,
-        metalness: 0.68,
-        polygonOffset: true,
-        polygonOffsetFactor: -2
-      })
-    );
-    fabPlate.position.set(0, 0.52, 0.935);
-    fabGroup.add(fabPlate);
-
-    const fabLight = new THREE.PointLight('#3be8ff', 1.45, 7.2);
-    fabLight.position.set(0.15, 1.55, 0.45);
-    fabGroup.add(fabLight);
-
-    // Floating holographic Station Name Badge above Fabrication Station!
-    const fabBadgeTex = createFloatingBadgeTexture('精密制造台', '板材/锭 → 飞船修复总成', '#5ce8ff');
-    const fabBadgeMat = new THREE.SpriteMaterial({
-      map: fabBadgeTex,
-      transparent: true,
-      depthTest: true
-    });
-    const fabBadge = new THREE.Sprite(fabBadgeMat);
-    fabBadge.position.set(0, 3.25, 0);
-    fabBadge.scale.set(3.4, 1.02, 1);
-    fabGroup.add(fabBadge);
-    this.stationBadges.push({
-      sprite: fabBadge,
-      mat: fabBadgeMat,
-      tex: fabBadgeTex,
-      x: fabCfg.x,
-      z: fabCfg.z,
-      baseW: 3.4,
-      baseH: 1.02,
-      zh: ['⚙️ 精密制造台', '精炼板材 → 合成飞船核心模块'],
-      en: ['⚙️ Fabrication Station', 'Assemble Ship Repair Modules']
-    });
-
-    this.groups.dynamic.add(fabGroup);
-    // Capsule-like 3-circle collider matching the 2.6m x 1.85m rectangular workbench so corners never clip!
-    this.colliders.push(
-      { id: 'fabricator', x: fabCfg.x, z: fabCfg.z, radius: 1.18 },
-      { id: 'fabricator_w', x: fabCfg.x - 0.72, z: fabCfg.z, radius: 1.02 },
-      { id: 'fabricator_e', x: fabCfg.x + 0.72, z: fabCfg.z, radius: 1.02 }
-    );
-
-    // 3. Outpost Field Purifier & Fabricator in Dry Canyon (South)
-    const pCfg = WORLD_FACILITIES.outpost_purifier;
-    const pGroup = new THREE.Group();
-    const py = getTerrainHeight(pCfg.x, pCfg.z, false);
-    pGroup.position.set(pCfg.x, py, pCfg.z);
-
-    const pBase = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.42, 0.88, 16), steelMat);
-    pBase.position.y = 0.44;
-    pBase.castShadow = true;
-    pGroup.add(pBase);
-
-    this.purifierRing = new THREE.Mesh(
-      new THREE.TorusGeometry(0.76, 0.095, 12, 28),
-      new THREE.MeshStandardMaterial({
-        color: '#5cffbe',
-        emissive: '#00b870',
-        emissiveIntensity: 2.0
-      })
-    );
-    this.purifierRing.rotation.x = Math.PI / 2;
-    this.purifierRing.position.y = 1.18;
-    pGroup.add(this.purifierRing);
-
-    const outBadgeTex = createFloatingBadgeTexture('前哨便携一体台', '现场熔炼 + 精密制造', '#52ffb8');
-    const outBadgeMat = new THREE.SpriteMaterial({
-      map: outBadgeTex,
-      transparent: true,
-      depthTest: true
-    });
-    const outBadge = new THREE.Sprite(outBadgeMat);
-    outBadge.position.set(0, 2.85, 0);
-    outBadge.scale.set(3.3, 0.99, 1);
-    pGroup.add(outBadge);
-    this.stationBadges.push({
-      sprite: outBadge,
-      mat: outBadgeMat,
-      tex: outBadgeTex,
-      x: pCfg.x,
-      z: pCfg.z,
-      baseW: 3.3,
-      baseH: 0.99,
-      zh: ['🧪 前哨便携一体台', '支持现场熔炼 + 维生组装'],
-      en: ['🧪 Outpost Workbench', 'Field Smelter & Fabricator']
-    });
-
-    this.groups.dynamic.add(pGroup);
-    this.colliders.push({ id: 'outpost_purifier', x: pCfg.x, z: pCfg.z, radius: pCfg.radius });
+    return buildDesertStations(this);
   }
 
   _buildRegionRoutesAndSignposts() {
-    const signs = [
-      {
-        x: 18.0,
-        z: 3.2,
-        rotY: -Math.PI / 2,
-        en: 'E: Signal Ridge (Lv.2)',
-        zh: '东: 低语山脊 (第2关)',
-        arrow: '→',
-        color: '#5ce6ff'
-      },
-      {
-        x: 3.2,
-        z: 18.5,
-        rotY: Math.PI,
-        en: 'S: Dry Canyon (Lv.3)',
-        zh: '南: 干涸峡谷 (第3关)',
-        arrow: '↓',
-        color: '#52ffb8'
-      },
-      {
-        x: -18.0,
-        z: -3.2,
-        rotY: Math.PI / 2,
-        en: 'W: Relay Gorge (Lv.4)',
-        zh: '西: 中继峡谷 (第4关)',
-        arrow: '←',
-        color: '#ffd666'
-      },
-      {
-        x: -3.2,
-        z: -18.5,
-        rotY: 0,
-        en: 'N: Vent Field (Lv.5)',
-        zh: '北: 地热喷口 (第5关)',
-        arrow: '↑',
-        color: '#ff78d0'
-      }
-    ];
+    // Declaratively build all directional route signposts & glowing beacon trails from REGIONS
+    const signs = [];
+    const beaconRoutes = [];
+    for (const reg of Object.values(REGIONS)) {
+      if (reg.signpost) signs.push(reg.signpost);
+      if (reg.beaconTrail) beaconRoutes.push(reg.beaconTrail);
+    }
 
     const postMat = new THREE.MeshStandardMaterial({
       color: '#3c4859',
@@ -1453,8 +1184,8 @@ export class WorldBuilder {
       metalness: 0.65
     });
     const postEntries = [];
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.12, 1.95, 10);
-    const boardGeo = new RoundedBoxGeometry(2.05, 0.68, 0.12, 3, 0.04);
+    const poleGeo = new THREE.CylinderGeometry(0.065, 0.105, 1.44, 10);
+    const boardGeo = new RoundedBoxGeometry(2.05, 0.68, 0.14, 3, 0.04);
 
     for (const s of signs) {
       const g = new THREE.Group();
@@ -1464,7 +1195,7 @@ export class WorldBuilder {
 
       postEntries.push({
         geo: poleGeo,
-        position: [s.x, y + 0.97, s.z]
+        position: [s.x, y + 0.72, s.z]
       });
 
       const boardTex = createSignpostTexture(s.zh, s.arrow, s.color);
@@ -1479,13 +1210,6 @@ export class WorldBuilder {
       this.groups.static.add(g);
       this.colliders.push({ id: `signpost_${s.x}_${s.z}`, x: s.x, z: s.z, radius: 0.45 });
     }
-
-    const beaconRoutes = [
-      { color: '#5ce6ff', pts: [[26, 1.5], [34, -1.5], [42, 1.8], [50, -1.5]] },
-      { color: '#52ffb8', pts: [[2.2, 28], [-2.2, 36], [2.2, 44], [-2.2, 52]] },
-      { color: '#ffd666', pts: [[-27, 2.0], [-33, -2.0], [-54, 2.0], [-61, -2.0]] },
-      { color: '#ff78d0', pts: [[-2.2, -28], [2.2, -37], [-2.2, -46], [2.2, -55]] }
-    ];
 
     const stemGeo = new THREE.CylinderGeometry(0.07, 0.11, 0.78, 8);
     const bulbGeo = new THREE.OctahedronGeometry(0.18, 1);
@@ -1505,7 +1229,7 @@ export class WorldBuilder {
         });
         bulbEntries.push({
           geo: bulbGeo,
-          position: [bx, by + 0.88, bz]
+          position: [bx, by + 0.84, bz]
         });
         this.colliders.push({ id: `beacon_${bx}_${bz}`, x: bx, z: bz, radius: 0.24 });
       }
@@ -1608,7 +1332,7 @@ export class WorldBuilder {
   }
 
   _buildRegionGates() {
-    const regionIds = ['whispering_ridge', 'dry_canyon', 'relay_gorge', 'geothermal_field'];
+    const gatedRegions = Object.values(REGIONS).filter((r) => Boolean(r.gateBarrier));
     const barMat = new THREE.MeshStandardMaterial({
       map: this.textures.hazard,
       roughness: 0.42,
@@ -1622,16 +1346,18 @@ export class WorldBuilder {
     postGeo.dispose();
     const shieldGeo = new THREE.PlaneGeometry(6.3, 1.65);
 
-    for (const rId of regionIds) {
-      const reg = REGIONS[rId];
+    for (const reg of gatedRegions) {
+      const rId = reg.id;
       const gb = reg.gateBarrier;
       const gy = getTerrainHeight(gb.x, gb.z, false);
+      // Supports any cardinal or diagonal gate angle!
+      const gateYaw = gb.angle !== undefined ? gb.angle : Math.atan2(gb.x, gb.z);
+      const cosY = Math.cos(gateYaw);
+      const sinY = Math.sin(gateYaw);
 
       const gateGroup = new THREE.Group();
       gateGroup.position.set(gb.x, gy, gb.z);
-      if (Math.abs(gb.x) > Math.abs(gb.z)) {
-        gateGroup.rotation.y = Math.PI / 2;
-      }
+      gateGroup.rotation.y = gateYaw;
 
       const postsMesh = new THREE.Mesh(mergedGatePostsGeo, barMat);
       postsMesh.castShadow = true;
@@ -1653,373 +1379,42 @@ export class WorldBuilder {
       this.gateBarriers.set(rId, { group: gateGroup, shield: energyShield, baseY: gy });
 
       const gateActiveFn = () => !this.state.isRegionUnlocked(rId);
-      const isEastWest = Math.abs(gb.x) > Math.abs(gb.z);
       this.colliders.push(
         { id: `gate_${rId}`, x: gb.x, z: gb.z, radius: 3.6, activeFn: gateActiveFn },
         {
           id: `gate_${rId}_p1`,
-          x: gb.x + (isEastWest ? 0 : -3.4),
-          z: gb.z + (isEastWest ? -3.4 : 0),
+          x: gb.x - 3.4 * cosY,
+          z: gb.z + 3.4 * sinY,
           radius: 0.62,
           activeFn: gateActiveFn
         },
         {
           id: `gate_${rId}_p2`,
-          x: gb.x + (isEastWest ? 0 : 3.4),
-          z: gb.z + (isEastWest ? 3.4 : 0),
+          x: gb.x + 3.4 * cosY,
+          z: gb.z - 3.4 * sinY,
           radius: 0.62,
           activeFn: gateActiveFn
         }
       );
+
     }
   }
 
   _buildRelayBridgeAndPylons() {
-    // Custom GLSL Scrolling Photonic Energy Bridge Deck!
-    this.bridgeUniforms = {
-      uTime: { value: 0 }
-    };
-    const bridgeMat = new THREE.ShaderMaterial({
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      uniforms: this.bridgeUniforms,
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        uniform float uTime;
-        void main() {
-          // Edge rails + scrolling photonic chevrons toward west star-field
-          float edge = smoothstep(0.36, 0.49, abs(vUv.y - 0.5));
-          float chevron = sin((vUv.x * 18.0 + uTime * 3.5) + abs(vUv.y - 0.5) * 8.0) * 0.5 + 0.5;
-          float grid = step(0.86, fract(vUv.x * 14.0)) + step(0.88, fract(vUv.y * 8.0));
-
-          vec3 baseCol = vec3(0.12, 0.78, 1.0);
-          vec3 brightCol = vec3(0.65, 0.98, 1.0);
-          vec3 col = mix(baseCol, brightCol, chevron * 0.55 + edge * 0.8 + clamp(grid, 0.0, 1.0) * 0.35);
-          float alpha = 0.62 + edge * 0.35 + chevron * 0.14;
-          gl_FragColor = vec4(col * 1.45, clamp(alpha, 0.0, 0.96));
-        }
-      `
-    });
-
-    const bridgeGeo = new THREE.PlaneGeometry(13.6, 6.2);
-    bridgeGeo.rotateX(-Math.PI / 2);
-    this.bridgeMesh = new THREE.Mesh(bridgeGeo, bridgeMat);
-    this.bridgeMesh.position.set(-45.0, 0.7, 0);
-    this.groups.dynamic.add(this.bridgeMesh);
-
-    const pierMat = new THREE.MeshStandardMaterial({
-      color: '#48455e',
-      roughness: 0.55,
-      metalness: 0.55
-    });
-    const pierEntries = [];
-    const pierBoxGeo = new RoundedBoxGeometry(1.3, 1.25, 7.1, 3, 0.08);
-    const pylonPedestalGeo = new THREE.CylinderGeometry(0.85, 1.12, 1.55, 12);
-    const obsBaseGeo = new THREE.CylinderGeometry(1.12, 1.48, 1.65, 14);
-
-    for (const px of [-38.3, -51.7]) {
-      // Top surface flush at y = 0.04 + 0.625 = 0.665 (right beneath y=0.70 hard-light deck — zero wheel clipping!)
-      pierEntries.push({
-        geo: pierBoxGeo,
-        position: [px, 0.04, 0]
-      });
-      this.colliders.push(
-        { id: `bridge_pier_${px}_n`, x: px, z: -3.35, radius: 0.52 },
-        { id: `bridge_pier_${px}_s`, x: px, z: 3.35, radius: 0.52 }
-      );
-    }
-
-    const mirrorFrameGeo = new RoundedBoxGeometry(1.56, 1.14, 0.18, 3, 0.05);
-    const mirrorFrameMat = new THREE.MeshStandardMaterial({
-      color: '#ffe082',
-      emissive: '#8f5b00',
-      emissiveIntensity: 1.2,
-      metalness: 0.88,
-      roughness: 0.16
-    });
-
-    for (const pCfg of WORLD_FACILITIES.pylons) {
-      const plat = pCfg.platformId
-        ? ELEVATED_PLATFORMS.find((pl) => pl.id === pCfg.platformId)
-        : null;
-      const py = plat ? plat.topY : getTerrainHeight(pCfg.x, pCfg.z, false);
-      const pg = new THREE.Group();
-      pg.position.set(pCfg.x, py, pCfg.z);
-
-      pierEntries.push({
-        geo: pylonPedestalGeo,
-        position: [pCfg.x, py + 0.77, pCfg.z]
-      });
-
-      const mirrorHead = new THREE.Group();
-      mirrorHead.position.y = 2.15;
-      const mirrorFrame = new THREE.Mesh(mirrorFrameGeo, mirrorFrameMat);
-      mirrorHead.add(mirrorFrame);
-      mirrorHead.rotation.set(0.55, 1.1, 0.35);
-
-      // 3D Conduit Cable spanning cleanly from Pylon base (even atop Sky-Spire!) to Bridge Pier
-      const endVec = new THREE.Vector3(-38.3 - pCfg.x, 0.45 - py, 0 - pCfg.z);
-      const startVec = new THREE.Vector3(0, 0.18, 0);
-      const diffVec = endVec.clone().sub(startVec);
-      const len = diffVec.length();
-      const cableMat = new THREE.MeshStandardMaterial({
-        color: '#ff7b3b',
-        emissive: '#cc4400',
-        emissiveIntensity: 1.6
-      });
-      const cable = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.11, 0.11, len, 10),
-        cableMat
-      );
-      cable.position.copy(startVec).addScaledVector(diffVec, 0.5);
-      cable.quaternion.setFromUnitVectors(
-        new THREE.Vector3(0, 1, 0),
-        diffVec.clone().normalize()
-      );
-
-      pg.add(mirrorHead, cable);
-      this.groups.dynamic.add(pg);
-      this.pylonVisuals.set(pCfg.id, { group: pg, mirrorHead, mirrorFrame, cableMat, y: py });
-      this.colliders.push({
-        id: pCfg.id,
-        x: pCfg.x,
-        z: pCfg.z,
-        radius: 1.05,
-        minY: plat ? plat.topY - 0.5 : undefined
-      });
-    }
-
-    // Ancient Observatory Dish across the bridge
-    const obs = WORLD_FACILITIES.observatory;
-    const oy = getTerrainHeight(obs.x, obs.z, false);
-    const obsGroup = new THREE.Group();
-    obsGroup.position.set(obs.x, oy, obs.z);
-
-    pierEntries.push({
-      geo: obsBaseGeo,
-      position: [obs.x, oy + 0.82, obs.z]
-    });
-
-    const mergedPiers = mergeTransformedGeometries(pierEntries);
-    pierBoxGeo.dispose();
-    pylonPedestalGeo.dispose();
-    obsBaseGeo.dispose();
-    if (mergedPiers) {
-      const m = new THREE.Mesh(mergedPiers, pierMat);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      this.groups.static.add(m);
-    }
-
-    const dishPts = [
-      new THREE.Vector2(0.02, 0),
-      new THREE.Vector2(0.75, 0.16),
-      new THREE.Vector2(1.48, 0.55)
-    ];
-    this.observatoryDishTop = new THREE.Mesh(
-      new THREE.LatheGeometry(dishPts, 24),
-      new THREE.MeshStandardMaterial({
-        color: '#b5c4ff',
-        emissive: '#1f2b5c',
-        emissiveIntensity: 1.1,
-        side: THREE.DoubleSide,
-        metalness: 0.72,
-        roughness: 0.22
-      })
-    );
-    this.observatoryDishTop.position.y = 2.05;
-    this.observatoryDishTop.rotation.x = 0.48;
-    obsGroup.add(this.observatoryDishTop);
-
-    this.groups.dynamic.add(obsGroup);
-    this.colliders.push({ id: 'observatory_dish', x: obs.x, z: obs.z, radius: obs.radius });
+    return buildRelayBridgeAndPylons(this);
   }
 
   _buildOutpostAndVentLandmarks() {
-    // Geodesic Research Outpost Dome Tent in Dry Canyon (South)
-    const tentX = -4.2;
-    const tentZ = 50.5;
-    const ty = getTerrainHeight(tentX, tentZ, false);
-    const tentGroup = new THREE.Group();
-    tentGroup.position.set(tentX, ty, tentZ);
+    return buildOutpostAndVentLandmarks(this);
+  }
 
-    const dome = new THREE.Mesh(
-      new THREE.SphereGeometry(2.62, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.52),
-      new THREE.MeshStandardMaterial({
-        color: '#eef4ec',
-        roughness: 0.55,
-        metalness: 0.12
-      })
-    );
-    dome.castShadow = true;
-    // Geodesic structural wireframe overlay for crisp sci-fi architectural detail
-    const geoWire = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(2.65, 1),
-      new THREE.MeshStandardMaterial({
-        color: '#2da67c',
-        wireframe: true,
-        roughness: 0.4
-      })
-    );
-    geoWire.position.y = 0.05;
-
-    const airlock = new THREE.Mesh(
-      new RoundedBoxGeometry(1.35, 1.45, 1.1, 3, 0.08),
-      new THREE.MeshStandardMaterial({ color: '#3b4a5e', metalness: 0.55, roughness: 0.45 })
-    );
-    airlock.position.set(2.15, 0.72, 0.8);
-    airlock.rotation.y = 0.38;
-    airlock.castShadow = true;
-
-    tentGroup.add(dome, geoWire, airlock);
-    this.groups.static.add(tentGroup);
-    this.colliders.push(
-      { id: 'outpost_tent', x: tentX, z: tentZ, radius: 2.72, maxY: ty + 3.0, occluder: true },
-      { id: 'outpost_airlock', x: tentX + 2.15, z: tentZ + 0.8, radius: 0.92, maxY: ty + 1.8 }
-    );
-
-    // Basalt Geothermal Vent Chimneys + Hexagonal Basalt Column Pillars in North Region
-    const basaltGeo = createBasaltClusterGeometry(515);
-    const basaltMat = new THREE.MeshStandardMaterial({
-      map: this.textures.rockMap,
-      normalMap: this.textures.rockNormal,
-      vertexColors: true,
-      roughness: 0.8,
-      metalness: 0.12
-    });
-    const basaltEntries = [];
-
-    const basaltPillars = [
-      [-15.5, -31.0, 1.45, 0.3],
-      [15.8, -34.5, 1.55, 1.8],
-      [-16.8, -47.0, 1.7, 2.5],
-      [16.5, -51.5, 1.6, 0.9],
-      [-14.2, -60.5, 1.5, 4.1],
-      [14.5, -62.0, 1.65, 5.2]
-    ];
-    for (const [bx, bz, bScale, bRot] of basaltPillars) {
-      const by = getTerrainHeight(bx, bz, false);
-      basaltEntries.push({
-        geo: basaltGeo,
-        position: [bx, by - 0.1, bz],
-        rotation: [0, bRot, 0],
-        scale: [bScale, bScale * 1.25, bScale]
-      });
-      this.colliders.push({ id: `basalt_${bx}_${bz}`, x: bx, z: bz, radius: bScale * 1.05 });
-    }
-
-    const ventCoords = [
-      [-4.2, -39.0],
-      [5.0, -47.0],
-      [-5.8, -54.5]
-    ];
-    const ventConeGeo = createHostRockOutcropGeometry(1.52, 2.05, 808);
-    const ventThroatGeo = new THREE.CylinderGeometry(0.56, 0.35, 0.4, 12);
-    const ventShardGeo = createHexCrystalGeometry(0.14, 0.35, 0.2, 0.18);
-    const glowMat = new THREE.MeshStandardMaterial({
-      color: '#ff78d8',
-      emissive: '#ff2ba6',
-      emissiveIntensity: 2.6
-    });
-    const ventGlowEntries = [];
-
-    ventCoords.forEach(([vx, vz], idx) => {
-      const vy = getTerrainHeight(vx, vz, false);
-      basaltEntries.push({
-        geo: ventConeGeo,
-        position: [vx, vy, vz]
-      });
-      ventGlowEntries.push({
-        geo: ventThroatGeo,
-        position: [vx, vy + 1.65, vz]
-      });
-      for (let c = 0; c < 4; c++) {
-        const ca = (c / 4) * Math.PI * 2 + idx;
-        ventGlowEntries.push({
-          geo: ventShardGeo,
-          position: [vx + Math.cos(ca) * 0.62, vy + 1.52, vz + Math.sin(ca) * 0.62],
-          rotation: [Math.sin(ca) * 0.35, ca, -Math.cos(ca) * 0.35]
-        });
-      }
-      this.colliders.push({ id: `vent_${idx}`, x: vx, z: vz, radius: 1.35 });
-    });
-
-    const mergedNorthBasalt = mergeTransformedGeometries(basaltEntries);
-    const mergedVentGlow = mergeTransformedGeometries(ventGlowEntries);
-    basaltGeo.dispose();
-    ventConeGeo.dispose();
-    ventThroatGeo.dispose();
-    ventShardGeo.dispose();
-    if (mergedNorthBasalt) {
-      const m = new THREE.Mesh(mergedNorthBasalt, basaltMat);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      this.groups.static.add(m);
-    }
-    if (mergedVentGlow) {
-      this.groups.static.add(new THREE.Mesh(mergedVentGlow, glowMat));
-    }
-
-    // Half-Buried Ancient Star-Relay Monolith Rings in West Gorge & Star-Field!
-    const ruinStoneMat = new THREE.MeshStandardMaterial({
-      map: this.textures.rockMap,
-      normalMap: this.textures.rockNormal,
-      color: '#6d688a',
-      roughness: 0.68,
-      metalness: 0.28
-    });
-    const runeGoldMat = new THREE.MeshStandardMaterial({
-      color: '#ffe078',
-      emissive: '#ffaa00',
-      emissiveIntensity: 1.85,
-      metalness: 0.8,
-      roughness: 0.2
-    });
-    const ruinStoneEntries = [];
-    const ruinGoldEntries = [];
-    const monolithTempGeos = [];
-    for (const [rx, rz, radius, tiltX, tiltZ, rotY] of [
-      [-45.0, -11.5, 5.2, 0.28, -0.15, 0.15],
-      [-64.5, 11.2, 6.4, -0.22, 0.32, 0.85]
-    ]) {
-      const ry = getTerrainHeight(rx, rz, false);
-      const archG = new THREE.TorusGeometry(radius, 0.48, 8, 28, Math.PI * 1.25);
-      const trimG = new THREE.TorusGeometry(radius + 0.02, 0.12, 6, 28, Math.PI * 1.2);
-      monolithTempGeos.push(archG, trimG);
-      ruinStoneEntries.push({
-        geo: archG,
-        position: [rx, ry + 0.6, rz],
-        rotation: [tiltX, rotY, tiltZ]
-      });
-      ruinGoldEntries.push({
-        geo: trimG,
-        position: [rx, ry + 0.6, rz],
-        rotation: [tiltX, rotY, tiltZ]
-      });
-    }
-    const mergedRuinStone = mergeTransformedGeometries(ruinStoneEntries);
-    const mergedRuinGold = mergeTransformedGeometries(ruinGoldEntries);
-    for (const g of monolithTempGeos) g.dispose();
-    if (mergedRuinStone) {
-      const m = new THREE.Mesh(mergedRuinStone, ruinStoneMat);
-      m.castShadow = true;
-      this.groups.static.add(m);
-    }
-    if (mergedRuinGold) {
-      this.groups.static.add(new THREE.Mesh(mergedRuinGold, runeGoldMat));
-    }
+  _buildMothershipWreckageAndDrones() {
+    return buildMothershipWreckageAndDrones(this);
   }
 
   _buildCrewLogs() {
-    const standGeo = new THREE.CylinderGeometry(0.2, 0.34, 0.92, 12);
+    const standGeo = new THREE.CylinderGeometry(0.18, 0.34, 0.96, 12);
+    const hingeGeo = new THREE.CylinderGeometry(0.11, 0.13, 0.20, 10);
     const screenGeo = new RoundedBoxGeometry(0.68, 0.46, 0.09, 3, 0.03);
     const standMat = new THREE.MeshStandardMaterial({
       color: '#394659',
@@ -2032,10 +1427,17 @@ export class WorldBuilder {
       const lg = new THREE.Group();
       lg.position.set(log.position.x, ly, log.position.z);
 
-      standEntries.push({
-        geo: standGeo,
-        position: [log.position.x, ly + 0.46, log.position.z]
-      });
+      standEntries.push(
+        {
+          geo: standGeo,
+          position: [log.position.x, ly + 0.48, log.position.z]
+        },
+        {
+          geo: hingeGeo,
+          position: [log.position.x, ly + 0.98, log.position.z],
+          rotation: [-0.35, 0, 0]
+        }
+      );
 
       const screen = new THREE.Mesh(
         screenGeo,
@@ -2046,7 +1448,7 @@ export class WorldBuilder {
           roughness: 0.2
         })
       );
-      screen.position.y = 1.08;
+      screen.position.set(0, 1.08, 0.03);
       screen.rotation.x = -0.35;
       lg.add(screen);
       this.groups.dynamic.add(lg);
@@ -2056,6 +1458,7 @@ export class WorldBuilder {
 
     const mergedStands = mergeTransformedGeometries(standEntries);
     standGeo.dispose();
+    hingeGeo.dispose();
     if (mergedStands) {
       this.groups.static.add(new THREE.Mesh(mergedStands, standMat));
     }
@@ -2272,8 +1675,9 @@ export class WorldBuilder {
       let orbitRing = null;
 
       const mId = node.materialId;
+      const matArch = getMaterialVisualArchetype(matDef);
 
-      if (mId === 'quartz_crystal' || mId === 'plasma_crystal' || mId === 'lumen_core') {
+      if (matArch === 'crystal') {
         // === TYPE A: Gemstone Hexagonal Crystal Formation (Merged into 2 draw calls: outer shell + inner core!) ===
         isCrystalLike = true;
         const { shellMat, innerCoreMat } = getCrystalMats(mId, matDef);
@@ -2321,13 +1725,13 @@ export class WorldBuilder {
           cluster.add(outerMesh);
         }
 
-        if (mId === 'lumen_core') {
+        if (matDef.hasOrbitHalo) {
           orbitRing = new THREE.Mesh(lumenHaloGeo, lumenHaloMat);
           orbitRing.position.y = 0.78;
           orbitRing.rotation.x = 1.1;
           cluster.add(orbitRing);
         }
-      } else if (mId === 'iron_scrap') {
+      } else if (matArch === 'scrap') {
         // === TYPE B: Crashed Spacecraft Hull Wreckage (Merged hull plates + shared materials!) ===
         const mergedScrapHull = mergeTransformedGeometries([
           {
@@ -2356,7 +1760,7 @@ export class WorldBuilder {
         conduit.rotation.set(0.85, 0.3, 0.25);
 
         cluster.add(beam, conduit);
-      } else if (mId === 'coolant_gel') {
+      } else if (matArch === 'gel') {
         // === TYPE D: Translucent Bioluminescent Cryo-Brine Gel Pods (Merged into 2 draw calls!) ===
         isCrystalLike = true;
         const pods = [
@@ -2389,8 +1793,8 @@ export class WorldBuilder {
           cluster.add(podMesh);
         }
       } else {
-        // === TYPE C: Rich Metallic / Mineral Ore Veins (Merged 6 nuggets into 1 Mesh + shared veinMat!) ===
-        const isZeolite = mId === 'zeolite_ore';
+        // === TYPE C: Rich Metallic / Crystalline Evaporite Mineral Ore Veins ===
+        const isZeolite = matArch === 'zeolite';
         const matrixRock = new THREE.Mesh(
           nodeIdx % 2 === 0 ? oreMatrixGeoA : oreMatrixGeoB,
           hostRockMat
@@ -2689,6 +2093,29 @@ export class WorldBuilder {
   update(dt, elapsed, highlightTarget, activeWaypoint = null, robotPos = null) {
     this.skyDome.uniforms.uTime.value = elapsed;
 
+    const hasJetpack = this.state.hasEquipment('jetpack');
+    if (this.desertUpdraftGroup) this.desertUpdraftGroup.visible = hasJetpack;
+    if (this.desertMotesGroup) this.desertMotesGroup.visible = hasJetpack;
+    if (hasJetpack) {
+      updateUpdraftVisuals(this.desertUpdraftRings, elapsed, 0.44);
+      if (this.desertAerialMotes) {
+        for (let i = 0; i < this.desertAerialMotes.length; i++) {
+          const m = this.desertAerialMotes[i];
+          const cd = this.desertMoteCooldowns?.[m.def.id] || 0;
+          if (cd > 0) {
+            this.desertMoteCooldowns[m.def.id] = Math.max(0, cd - dt);
+          }
+          const active = (this.desertMoteCooldowns?.[m.def.id] || 0) <= 0;
+          m.group.visible = active;
+          if (active) {
+            m.group.position.y = m.baseY + Math.sin(elapsed * 2.2 + m.phase) * 0.35;
+            m.group.rotation.y += dt * 1.4;
+            m.halo.rotation.x = Math.sin(elapsed * 1.6 + m.phase) * 0.55;
+          }
+        }
+      }
+    }
+
     // Dynamically refresh 3D signpost & station badge CanvasTextures when language toggles!
     if (this._lastLang !== this.state.lang) {
       this._lastLang = this.state.lang;
@@ -2767,7 +2194,9 @@ export class WorldBuilder {
     }
 
     if (this.observatoryDishTop && this.state.observatoryRestored) {
-      this.observatoryDishTop.rotation.y += dt * 0.85;
+      if (this.observatoryTurntable) {
+        this.observatoryTurntable.rotation.y += dt * 0.85;
+      }
       if (!this._obsLit) {
         this._obsLit = true;
         this.observatoryDishTop.material.emissive.set('#2b6cff');
@@ -2777,6 +2206,19 @@ export class WorldBuilder {
     }
 
     const busyQueue = this.state.craftingQueue.length > 0;
+    if (this.furnaceBatteryGroup) {
+      const hasBat = this.state.hasEquipment('battery');
+      this.furnaceBatteryGroup.visible = hasBat;
+      if (hasBat && this.furnaceBatteryGlowMat) {
+        const solarInfo = this.state.getSolarStatusInfo();
+        const discharging = solarInfo.stateTag === 'buffered';
+        this.furnaceBatteryGlowMat.color.set(discharging ? '#5ef2ff' : '#ffd24d');
+        this.furnaceBatteryGlowMat.emissive.set(discharging ? '#00b7ff' : '#ffaa00');
+        this.furnaceBatteryGlowMat.emissiveIntensity = discharging
+          ? 2.2 + Math.sin(elapsed * 7.0) * 0.45
+          : 1.5 + Math.sin(elapsed * 2.2) * 0.2;
+      }
+    }
     if (this.furnaceCoreMesh) {
       const pulse = busyQueue
         ? 3.0 + Math.sin(elapsed * 14) * 0.6
@@ -2791,8 +2233,68 @@ export class WorldBuilder {
     if (this.fabricatorLaser) {
       this.fabricatorLaser.visible = busyQueue;
     }
-    if (this.purifierRing) {
+    if (this.purifierRings && this.purifierRings.length > 0) {
+      const spin = dt * (busyQueue ? 3.5 : 0.8);
+      for (const pr of this.purifierRings) {
+        pr.rotation.z += spin;
+      }
+    } else if (this.purifierRing) {
       this.purifierRing.rotation.z += dt * (busyQueue ? 3.5 : 0.8);
+    }
+
+    // Update Post-Game Climate Telemetry Beacons & Autonomous Mining Drone Patrols!
+    const showPostBeacons = Boolean(this.state.launchedHome);
+    for (const [bId, bv] of this.beaconVisuals.entries()) {
+      bv.group.visible = showPostBeacons;
+      if (!showPostBeacons) continue;
+      const active = this.state.isMechanismNodeActive('weather_beacons', bId);
+      bv.orb.rotation.y += dt * (active ? 2.6 : 0.7);
+      bv.ring.rotation.z += dt * (active ? 2.0 : 0.4);
+      if (bv._lastActive !== active) {
+        bv._lastActive = active;
+        bv.orbMat.color.set(active ? '#66ffc2' : '#788ca3');
+        bv.orbMat.emissive.set(active ? '#0ec47a' : '#1b354d');
+        bv.orbMat.emissiveIntensity = active ? 2.4 : 1.1;
+      }
+    }
+
+    if (this.droneBayGroup) {
+      const hasDrones = this.state.hasEquipment('drone_fleet');
+      this.droneBayGroup.visible = hasDrones;
+      if (hasDrones) {
+        for (const da of this.droneAgents) {
+          const a = elapsed * 0.85 + da.phaseOffset;
+          const rOrbit = 4.2 + Math.sin(a * 0.5) * 2.6;
+          const drOrbit = 1.3 * Math.cos(a * 0.5);
+          const cosA = Math.cos(a);
+          const sinA = Math.sin(a);
+          da.group.position.set(
+            cosA * rOrbit,
+            1.85 + Math.sin(elapsed * 3.2 + da.phaseOffset) * 0.26,
+            sinA * rOrbit
+          );
+          const tx = drOrbit * cosA - rOrbit * sinA;
+          const tz = drOrbit * sinA + rOrbit * cosA;
+          da.group.rotation.order = 'YXZ';
+          da.group.rotation.y = Math.atan2(tx, tz);
+          da.group.rotation.x = 0.14 + Math.cos(elapsed * 3.2 + da.phaseOffset) * 0.07;
+          da.group.rotation.z = -0.18;
+
+          if (da.rotors) {
+            for (let ri = 0; ri < da.rotors.length; ri++) {
+              da.rotors[ri].rotation.y = elapsed * (ri === 0 ? 22.0 : -22.0);
+            }
+          }
+          if (da.cargo) {
+            da.cargo.rotation.y = elapsed * 1.8 + da.phaseOffset;
+            da.cargo.position.y = -0.35 + Math.sin(elapsed * 4.5 + da.phaseOffset) * 0.022;
+          }
+          if (da.beam) {
+            const beamPulse = 0.92 + Math.sin(elapsed * 5.0 + da.phaseOffset) * 0.08;
+            da.beam.scale.set(beamPulse, 1, beamPulse);
+          }
+        }
+      }
     }
 
     const rx = robotPos ? robotPos.x : 0;
@@ -2830,16 +2332,20 @@ export class WorldBuilder {
 
       const isClose = !robotPos || distSq <= animDistSq || sonarLit;
       if (isSub) {
+        const nearDrillResonance = Boolean(
+          robotPos && distSq <= 196 && this.state.hasEquipment('drill')
+        );
         rv.cluster.position.y = available
-          ? (sonarLit ? -0.14 : -0.28) + (isClose ? Math.sin(elapsed * 3.2 + rv.node.x) * 0.03 : 0)
+          ? (sonarLit ? -0.12 : nearDrillResonance ? -0.20 : -0.28) +
+            (isClose ? Math.sin(elapsed * 3.2 + rv.node.x) * 0.03 : 0)
           : -0.42;
         if (rv.sonarEchoRing) {
-          rv.sonarEchoRing.visible = available && sonarLit;
+          rv.sonarEchoRing.visible = available && (sonarLit || nearDrillResonance);
           if (rv.sonarEchoRing.visible) {
-            const p = (elapsed * 1.6) % 1;
-            rv.sonarEchoRing.position.y = 0.2 + p * 1.4;
-            rv.sonarEchoRing.scale.setScalar(0.85 + p * 0.9);
-            rv.sonarEchoRing.material.opacity = (1 - p) * 0.9;
+            const p = (elapsed * (sonarLit ? 1.6 : 0.85)) % 1;
+            rv.sonarEchoRing.position.y = 0.2 + p * (sonarLit ? 1.4 : 0.72);
+            rv.sonarEchoRing.scale.setScalar(0.85 + p * (sonarLit ? 0.9 : 0.45));
+            rv.sonarEchoRing.material.opacity = (1 - p) * (sonarLit ? 0.9 : 0.42);
           }
         }
       } else if (available && rv.isCrystalLike && isClose) {

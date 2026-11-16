@@ -1,23 +1,35 @@
 import * as THREE from 'three';
+import { buildSpacecraftRepairModules } from './spacecraftRepairModules.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { PREFLIGHT_CHECKS, REPAIR_TARGETS } from '../data/gameData.js';
 import {
   createHullRegistryDecalTexture,
   createIndustrialSpecPlateTexture,
   createMetalHullPBR,
-  createScorchDecalTexture,
-  createVisorCanvas
+  createScorchDecalTexture
 } from '../graphics/textures.js';
 import { applyWorldWeathering } from '../graphics/gpuMaterialBaker.js';
 import { getTerrainHeight, lerp, clamp, smoothstep } from '../utils/math.js';
+import { buildHomeworldEnhancements, updateHomeworldEnhancements } from './homeworldBuilder.js';
+import {
+  buildHomeworldCharacters, updateHomeworldCharacters,
+  resetHomeworldCeremony as resetColonyCeremony,
+  startHomeworldCeremony as startColonyCeremony,
+  notifyHomeworldPlayerArrived as notifyColonyPlayerArrived
+} from './homeworldCharacters.js';
+import { buildHomeworldLandscape } from './homeworldLandscape.js';
+import { disposeObjectSubtree, isHomeworldContext } from './worldLifecycle.js';
+import { HOMEWORLD_CONFIG, getHomeworldGroundHeight } from '../data/homeworldData.js';
+import { createThrusterPlume, updateThrusterPlume, createAscentShield, createLaunchGroundWash } from '../graphics/launchEffects.js';
 
 export class SpacecraftBuilder {
-  constructor(scene, state, environments = null, skyDome = null, pbrLibrary = null) {
+  constructor(scene, state, environments = null, skyDome = null, pbrLibrary = null, opts = {}) {
     this.scene = scene;
     this.state = state;
     this.environments = environments;
     this.skyDome = skyDome;
     this.pbrLibrary = pbrLibrary;
+    this.homeworldGroup = null;
 
     this.group = new THREE.Group();
     this.group.name = 'spacecraft';
@@ -38,11 +50,34 @@ export class SpacecraftBuilder {
     this.repairMarkers = new Map();
     this.preflightMeshes = new Map();
     this.signalRings = [];
-    this._lastRepairKey = '';
+    this.homeworldColliders = [];
+    this.homeworldCameraOccluders = [];
+    this.homeworldActivityVisuals = null;
+    this.homeworldEnhancements = null;
+    this.crewFigures = [];
+    this.warpTunnelLines = null;
+    this._repairIds = Object.keys(REPAIR_TARGETS);
+    this._lastRepairKey = -1;
+    this._boardingStart = new THREE.Vector3(4.45, this.baseGroundY, 1.5);
+    this._boardingBackExtent = 0.95;
+    this._boardingInsideX = 0.95;
+    this._boardingBounds = new THREE.Box3();
+    this._boardingPartBounds = new THREE.Box3();
+    this._boardingInverse = new THREE.Matrix4();
+    this._boardingPartMatrix = new THREE.Matrix4();
+    this._exitPoint = new THREE.Vector3();
+    this._exitTangent = new THREE.Vector3();
+    this._exitBefore = new THREE.Vector3();
+    this._exitAfter = new THREE.Vector3();
+    this._exitWalk = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(4.45, 0, -0.7), new THREE.Vector3(4.3, 0, 2.8),
+      new THREE.Vector3(2.5, 0, 6.1), new THREE.Vector3(HOMEWORLD_CONFIG.spawnX, 0, HOMEWORLD_CONFIG.spawnZ)
+    ], false, 'centripetal');
 
     // Pre-allocated scratch vectors/colors for zero-GC cutscene playback
     this._cutCamPos = new THREE.Vector3();
     this._cutCamLook = new THREE.Vector3();
+    this._homeworldCameraPose = { position: this._cutCamPos, lookAt: this._cutCamLook };
     this._skyDesertCol = new THREE.Color('#e5b487');
     this._skySpaceCol = new THREE.Color('#091126');
 
@@ -50,38 +85,74 @@ export class SpacecraftBuilder {
     this._buildShipHull();
     this._buildRepairModules();
     this._buildPreflightAndRamp();
-    this._buildHomeworldScene();
+    if (!opts.deferHomeworld) {
+      this._buildHomeworldScene();
+    }
+    this.launchGroundWash = createLaunchGroundWash();
+    this.crashSiteDecals.add(this.launchGroundWash);
   }
 
   getColliders() {
-    const shipVis = () => this.group.visible;
-    const rampVis = () => this.group.visible && this.boardingRamp && this.boardingRamp.visible;
+    const desertShipVis = () => this.group.visible && this.group.position.y < 100;
+    const rampVis = () =>
+      desertShipVis() && this.boardingRamp && this.boardingRamp.visible;
+    const homeVis = () => Boolean(this.homeworldGroup && this.homeworldGroup.visible);
     return [
       // Main fuselage spine + aft twin thruster bells + tapered nose cone (occludes camera too)
-      { id: 'ship_thrusters', x: 0, z: -5.05, radius: 1.92, maxY: 4.4, occluder: true, activeFn: shipVis },
-      { id: 'ship_aft', x: 0, z: -3.35, radius: 2.52, maxY: 4.6, occluder: true, activeFn: shipVis },
-      { id: 'ship_mid', x: 0, z: 0.0, radius: 2.68, maxY: 4.8, occluder: true, activeFn: shipVis },
-      { id: 'ship_fwd', x: 0, z: 3.35, radius: 2.32, maxY: 4.4, occluder: true, activeFn: shipVis },
-      { id: 'ship_nose', x: 0, z: 5.75, radius: 1.42, maxY: 3.6, occluder: true, activeFn: shipVis },
+      { id: 'ship_thrusters', x: 0, z: -5.05, radius: 1.92, maxY: 4.4, occluder: true, activeFn: desertShipVis },
+      { id: 'ship_aft', x: 0, z: -3.35, radius: 2.52, maxY: 4.6, occluder: true, activeFn: desertShipVis },
+      { id: 'ship_mid', x: 0, z: 0.0, radius: 2.68, maxY: 4.8, occluder: true, activeFn: desertShipVis },
+      { id: 'ship_fwd', x: 0, z: 3.35, radius: 2.32, maxY: 4.4, occluder: true, activeFn: desertShipVis },
+      { id: 'ship_nose', x: 0, z: 5.75, radius: 1.42, maxY: 3.6, occluder: true, activeFn: desertShipVis },
+      { id: 'ship_nav_lens', x: 0, z: 7.25, radius: 0.56, minY: this.baseGroundY - 0.1, maxY: 2.85, occluder: true, occluderMinY: 1.7, activeFn: desertShipVis },
+      { id: 'ship_comms', x: -0.62, z: 0.55, radius: 1.2,
+        minY: this.baseGroundY + this.commsPivot.position.y - 2.25,
+        maxY: this.baseGroundY + this.commsPivot.position.y + 2.2,
+        occluder: true, occluderMinY: this.baseGroundY + this.commsPivot.position.y, activeFn: desertShipVis },
 
       // Swept delta wings (port & starboard) + wingtip RCS pods — height-capped at y=2.38 so jetpack can fly over,
       // and marked as thickness-aware camera occluders (occluderMinY..maxY) so camera never clips through wings!
-      { id: 'ship_wing_l_in', x: -2.45, z: -1.15, radius: 1.48, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
-      { id: 'ship_wing_l_out', x: -3.65, z: -1.82, radius: 1.05, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
-      { id: 'ship_pod_l_fwd', x: -4.48, z: -0.92, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
-      { id: 'ship_pod_l_aft', x: -4.48, z: -2.18, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_wing_l_in', x: -2.45, z: -1.15, radius: 1.48, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
+      { id: 'ship_wing_l_out', x: -3.65, z: -1.82, radius: 1.05, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
+      { id: 'ship_pod_l_fwd', x: -4.48, z: -0.92, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
+      { id: 'ship_pod_l_aft', x: -4.48, z: -2.18, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
 
-      { id: 'ship_wing_r_in', x: 2.45, z: -1.15, radius: 1.48, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
-      { id: 'ship_wing_r_out', x: 3.65, z: -1.82, radius: 1.05, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
-      { id: 'ship_pod_r_fwd', x: 4.48, z: -0.92, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
-      { id: 'ship_pod_r_aft', x: 4.48, z: -2.18, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: shipVis },
+      { id: 'ship_wing_r_in', x: 2.45, z: -1.15, radius: 1.48, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
+      { id: 'ship_wing_r_out', x: 3.65, z: -1.82, radius: 1.05, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
+      { id: 'ship_pod_r_fwd', x: 4.48, z: -0.92, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
+      { id: 'ship_pod_r_aft', x: 4.48, z: -2.18, radius: 0.52, maxY: 2.38, occluder: true, occluderMinY: 0.95, activeFn: desertShipVis },
 
-      // Extended boarding ramp side guard + outer sand berm colliders
-      { id: 'ship_berm_l', x: -4.9, z: -4.6, radius: 1.05, maxY: 1.2 },
-      { id: 'ship_berm_r', x: 4.9, z: -4.6, radius: 1.05, maxY: 1.2 },
-      { id: 'ship_berm_fwd', x: 0.0, z: 8.35, radius: 1.15, maxY: 1.2 },
-      { id: 'ship_ramp_mid', x: 2.85, z: 1.5, radius: 0.85, maxY: 1.8, activeFn: rampVis }
+      // Extended boarding ramp side guard + outer sand berm colliders (desert plane only)
+      { id: 'ship_berm_l', x: -4.9, z: -4.6, radius: 1.05, maxY: 1.2, activeFn: desertShipVis },
+      { id: 'ship_berm_r', x: 4.9, z: -4.6, radius: 1.05, maxY: 1.2, activeFn: desertShipVis },
+      { id: 'ship_berm_fwd', x: 0.0, z: 8.35, radius: 1.15, maxY: 1.2, activeFn: desertShipVis },
+      { id: 'ship_ramp_mid', x: 2.85, z: 1.5, radius: 0.85, maxY: 1.8, activeFn: rampVis },
+
+      // Homeworld Meadow Colliders (active when strolling Homeworld at Y = 420, ship parked at z = -2.2!)
+      { id: 'hw_ship_aft', x: 0, z: -5.8, radius: 2.6, minY: 419, maxY: 425.2, occluder: true, activeFn: homeVis },
+      { id: 'hw_ship_mid', x: 0, z: -2.2, radius: 2.75, minY: 419, maxY: 425.4, occluder: true, activeFn: homeVis },
+      { id: 'hw_ship_fwd', x: 0, z: 1.4, radius: 2.25, minY: 419, maxY: 424.6, occluder: true, activeFn: homeVis },
+      { id: 'hw_ship_nose', x: 0, z: 3.55, radius: 1.42, minY: 419, maxY: 423.62, occluder: true, activeFn: homeVis },
+      { id: 'hw_ship_nav_lens', x: 0, z: 5.05, radius: 0.56, minY: HOMEWORLD_CONFIG.baseY - 0.1, maxY: 422.87, occluder: true, occluderMinY: 421.72, activeFn: homeVis },
+      { id: 'hw_ship_comms', x: -0.62, z: -1.65, radius: 1.2,
+        minY: HOMEWORLD_CONFIG.padY + this.commsPivot.position.y - 2.25,
+        maxY: HOMEWORLD_CONFIG.padY + this.commsPivot.position.y + 2.2,
+        occluder: true, occluderMinY: HOMEWORLD_CONFIG.padY + this.commsPivot.position.y, activeFn: homeVis },
+      { id: 'hw_cottage_main', x: -10.5, z: -7.8, radius: 3.75, minY: 419, maxY: 424.8, occluder: true, activeFn: homeVis },
+      { id: 'hw_cottage_annex', x: -13.6, z: -5.2, radius: 2.25, minY: 419, maxY: 423.8, occluder: true, activeFn: homeVis },
+      ...this.homeworldColliders.map((c) => {
+        c.activeFn = homeVis;
+        return c;
+      })
     ];
+  }
+
+  getHomeworldDynamicColliders() {
+    const homeVis = () => Boolean(this.homeworldGroup && this.homeworldGroup.visible);
+    return this.homeworldColliders.map((c) => {
+      c.activeFn = homeVis;
+      return c;
+    });
   }
 
   _buildCrashSkidAndBerms() {
@@ -196,6 +267,7 @@ export class SpacecraftBuilder {
     const fuselageGeo = new THREE.LatheGeometry(profilePoints, 32);
     fuselageGeo.rotateX(Math.PI / 2);
     const fuselage = new THREE.Mesh(fuselageGeo, hullMat);
+    this.fuselage = fuselage;
     fuselage.scale.set(1.04, 0.92, 1.0);
     fuselage.position.set(0, 2.25, 0);
     fuselage.castShadow = true;
@@ -302,7 +374,8 @@ export class SpacecraftBuilder {
       this.hullPivot.add(vFin);
     }
 
-    // 4. Articulated dual-strut hydraulic landing gear
+    // 4. Articulated dual-strut hydraulic landing gear (telescopic pistons keep all 4 foot pads flush on sand even under crash tilt!)
+    this.landingStruts = [];
     const strutCoords = [
       [-1.85, 2.45],
       [1.85, 2.45],
@@ -312,13 +385,19 @@ export class SpacecraftBuilder {
     for (const [lx, lz] of strutCoords) {
       const lg = new THREE.Group();
       lg.position.set(lx, 0, lz);
-      const upper = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.19, 0.19, 0.95, 12),
+      const wellHousing = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.32, 0.26, 0.42, 14),
         darkTitaniumMat
       );
-      upper.position.y = 1.15;
+      wellHousing.position.y = 1.92;
+      const upper = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.19, 0.19, 1.32, 12),
+        darkTitaniumMat
+      );
+      upper.position.y = 1.34;
+      upper.castShadow = true;
       const piston = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.12, 0.12, 0.85, 12),
+        new THREE.CylinderGeometry(0.12, 0.12, 1.0, 12),
         copperMat
       );
       piston.position.y = 0.55;
@@ -328,8 +407,10 @@ export class SpacecraftBuilder {
       );
       pad.position.y = 0.09;
       pad.castShadow = true;
-      lg.add(upper, piston, pad);
+      lg.add(wellHousing, upper, piston, pad);
       this.hullPivot.add(lg);
+      const groundOffset = getTerrainHeight(lx, lz, false) - this.baseGroundY;
+      this.landingStruts.push({ lx, lz, piston, pad, groundOffset });
     }
 
     // 5. Recessed Panoramic Cockpit Canopy + Detailed Interior Bridge
@@ -441,8 +522,15 @@ export class SpacecraftBuilder {
       specB: 'INSERT CORE TO BOOT',
       accent: '#ff9638'
     });
+    const bayPlateMount = new THREE.Mesh(
+      new RoundedBoxGeometry(0.52, 0.38, 0.64, 2, 0.03),
+      darkTitaniumMat
+    );
+    bayPlateMount.position.set(1.96, 2.40, 2.45);
+    bayPlateMount.rotation.y = 0.14;
+    bayPlateMount.rotation.z = -0.10;
     const bayPlate = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.62, 0.36),
+      new THREE.PlaneGeometry(0.60, 0.34),
       new THREE.MeshStandardMaterial({
         map: bayPlateTex,
         roughness: 0.42,
@@ -451,336 +539,15 @@ export class SpacecraftBuilder {
         polygonOffsetFactor: -3
       })
     );
-    bayPlate.position.set(2.49, 2.38, 2.45);
+    bayPlate.position.x = 0.265;
     bayPlate.rotation.y = Math.PI * 0.5;
-    this.hullPivot.add(bayPlate);
+    bayPlateMount.add(bayPlate);
+    this.hullPivot.add(bayPlateMount);
   }
 
   _buildRepairModules() {
-    const darkFrameMat =
-      this._sharedDarkTitaniumMat ||
-      new THREE.MeshStandardMaterial({
-        color: '#2c374a',
-        roughness: 0.42,
-        metalness: 0.7
-      });
-
-    // 1. Power Core Bay (Starboard +X, +Z)
-    this.powerBayGroup = new THREE.Group();
-    this.powerBayGroup.position.set(2.12, 1.72, 2.45);
-    const powerHousing = new THREE.Mesh(
-      new RoundedBoxGeometry(0.72, 1.02, 1.32, 4, 0.1),
-      darkFrameMat
-    );
-    this.powerCoreCell = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.3, 0.3, 0.86, 18),
-      new THREE.MeshStandardMaterial({
-        color: '#ffd266',
-        emissive: '#ff9900',
-        emissiveIntensity: 2.2,
-        roughness: 0.2
-      })
-    );
-    this.powerCoreCell.rotation.x = Math.PI / 2;
-    this.powerCoreCell.position.x = 0.26;
-
-    // Containment rings around power core
-    for (const cz of [-0.24, 0.24]) {
-      const cRing = new THREE.Mesh(
-        new THREE.TorusGeometry(0.32, 0.045, 8, 18),
-        darkFrameMat
-      );
-      cRing.position.set(0.26, 0, cz);
-      this.powerCoreCell.add(cRing);
-    }
-
-    this.powerSparkBulb = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.22, 1),
-      new THREE.MeshBasicMaterial({ color: '#ff6238' })
-    );
-    this.powerSparkBulb.position.x = 0.4;
-    this.powerBayGroup.add(powerHousing, this.powerCoreCell, this.powerSparkBulb);
-    this.hullPivot.add(this.powerBayGroup);
-
-    // 2. Dorsal Deep-Space Communications Array
-    this.commsPivot = new THREE.Group();
-    this.commsPivot.position.set(-0.72, 3.98, 0.55);
-    const mastBase = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.35, 0.45, 0.26, 14),
-      darkFrameMat
-    );
-    const mast = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.14, 0.18, 0.82, 12),
-      darkFrameMat
-    );
-    mast.position.y = 0.45;
-
-    this.commsDishHead = new THREE.Group();
-    this.commsDishHead.position.y = 0.92;
-
-    // Smooth parabolic dish via LatheGeometry
-    const dishPts = [
-      new THREE.Vector2(0.01, 0),
-      new THREE.Vector2(0.45, 0.08),
-      new THREE.Vector2(0.82, 0.26),
-      new THREE.Vector2(1.05, 0.48)
-    ];
-    const dishGeo = new THREE.LatheGeometry(dishPts, 24);
-    const dishBowl = new THREE.Mesh(
-      dishGeo,
-      new THREE.MeshStandardMaterial({
-        color: '#e8f1fc',
-        metalness: 0.65,
-        roughness: 0.24,
-        side: THREE.DoubleSide
-      })
-    );
-    const feedStrut = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.035, 0.035, 0.68, 8),
-      darkFrameMat
-    );
-    feedStrut.position.y = 0.34;
-
-    this.commsTipLight = new THREE.Mesh(
-      new THREE.SphereGeometry(0.13, 12, 10),
-      new THREE.MeshStandardMaterial({
-        color: '#75f6ff',
-        emissive: '#00ccff',
-        emissiveIntensity: 2.4
-      })
-    );
-    this.commsTipLight.position.y = 0.72;
-    this.commsDishHead.add(dishBowl, feedStrut, this.commsTipLight);
-    this.commsPivot.add(mastBase, mast, this.commsDishHead);
-    this.hullPivot.add(this.commsPivot);
-
-    for (let i = 0; i < 3; i++) {
-      const sRing = new THREE.Mesh(
-        new THREE.RingGeometry(0.36, 0.44, 32),
-        new THREE.MeshBasicMaterial({
-          color: '#6cf5ff',
-          transparent: true,
-          opacity: 0.7,
-          side: THREE.DoubleSide
-        })
-      );
-      sRing.rotation.x = Math.PI / 2;
-      sRing.visible = false;
-      this.commsPivot.add(sRing);
-      this.signalRings.push(sRing);
-    }
-
-    // 3. Port Bio-Dome Life-Support Terrarium (-X)
-    this.lifeDomeGroup = new THREE.Group();
-    this.lifeDomeGroup.position.set(-2.22, 2.25, -0.45);
-    this.bioDomeGlass = new THREE.Mesh(
-      new THREE.SphereGeometry(0.9, 24, 18),
-      new THREE.MeshPhysicalMaterial({
-        color: '#7a5c43',
-        emissive: '#171008',
-        emissiveIntensity: 0.35,
-        transparent: true,
-        opacity: 0.68,
-        roughness: 0.1,
-        clearcoat: 1.0
-      })
-    );
-
-    // Lush glowing bio-terrarium sprout with flower bud inside!
-    this.bioSprout = new THREE.Group();
-    const soilBed = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.48, 0.42, 0.18, 14),
-      new THREE.MeshStandardMaterial({ color: '#5c3d28', roughness: 0.9 })
-    );
-    soilBed.position.y = -0.22;
-    const stem = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.045, 0.06, 0.5, 8),
-      new THREE.MeshStandardMaterial({
-        color: '#47f08b',
-        emissive: '#148f47',
-        emissiveIntensity: 0.8
-      })
-    );
-    const leafGeo = new THREE.SphereGeometry(0.18, 12, 10);
-    const leafMat = new THREE.MeshStandardMaterial({
-      color: '#66ffa6',
-      emissive: '#19a855',
-      emissiveIntensity: 0.9,
-      roughness: 0.3
-    });
-    const leafL = new THREE.Mesh(leafGeo, leafMat);
-    leafL.scale.set(1.45, 0.38, 0.85);
-    leafL.position.set(-0.18, 0.12, 0);
-    leafL.rotation.z = 0.35;
-    const leafR = leafL.clone();
-    leafR.position.set(0.18, 0.16, 0);
-    leafR.rotation.z = -0.35;
-    const bud = new THREE.Mesh(
-      new THREE.SphereGeometry(0.11, 10, 10),
-      new THREE.MeshBasicMaterial({ color: '#fff28c' })
-    );
-    bud.position.y = 0.32;
-
-    this.bioSprout.add(soilBed, stem, leafL, leafR, bud);
-    this.bioSprout.rotation.z = Math.PI / 2;
-    this.bioSprout.visible = false;
-
-    this.coolantPipeMat = new THREE.MeshStandardMaterial({
-      color: '#4e5b6e',
-      emissive: '#000000',
-      emissiveIntensity: 1.5,
-      metalness: 0.55,
-      roughness: 0.25
-    });
-    const flange = new THREE.Mesh(
-      new THREE.TorusGeometry(0.92, 0.1, 12, 28),
-      this.coolantPipeMat
-    );
-    flange.rotation.y = Math.PI / 2;
-
-    this.lifeDomeGroup.add(this.bioDomeGlass, this.bioSprout, flange);
-    this.hullPivot.add(this.lifeDomeGroup);
-
-    // 4. Forward Nose Astrogation Star-Projector (+Z tip)
-    this.navNoseGroup = new THREE.Group();
-    this.navNoseGroup.position.set(0, 2.25, 7.25);
-    const bezel = new THREE.Mesh(
-      new THREE.TorusGeometry(0.44, 0.08, 10, 24),
-      new THREE.MeshStandardMaterial({ color: '#e6b84c', metalness: 0.85, roughness: 0.22 })
-    );
-    this.navLens = new THREE.Mesh(
-      new THREE.SphereGeometry(0.42, 20, 16),
-      new THREE.MeshStandardMaterial({
-        color: '#4c5566',
-        emissive: '#141820',
-        emissiveIntensity: 1.8,
-        roughness: 0.15,
-        metalness: 0.3
-      })
-    );
-    this.navHoloProjector = new THREE.Group();
-    this.navHoloProjector.position.z = 1.05;
-    const hRing1 = new THREE.Mesh(
-      new THREE.TorusGeometry(0.72, 0.032, 8, 36),
-      new THREE.MeshBasicMaterial({ color: '#ffe478' })
-    );
-    const hRing2 = new THREE.Mesh(
-      new THREE.TorusGeometry(0.48, 0.028, 8, 32),
-      new THREE.MeshBasicMaterial({ color: '#6cf5ff' })
-    );
-    hRing2.rotation.x = Math.PI / 3;
-    const hStar = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.2, 0),
-      new THREE.MeshBasicMaterial({ color: '#fff8cc' })
-    );
-    this.navHoloProjector.add(hRing1, hRing2, hStar);
-    this.navHoloProjector.visible = false;
-    this.navNoseGroup.add(bezel, this.navLens, this.navHoloProjector);
-    this.hullPivot.add(this.navNoseGroup);
-
-    // 5. Twin Aft Magnetic Plasma Thrusters (-Z stern)
-    this.engineGroup = new THREE.Group();
-    this.engineGroup.position.set(0, 2.22, -4.68);
-    this.engineNozzles = [];
-    this.enginePlumes = [];
-
-    // Lathe bell nozzle profile
-    const bellProfile = [
-      new THREE.Vector2(0.42, 0),
-      new THREE.Vector2(0.56, 0.45),
-      new THREE.Vector2(0.76, 0.95),
-      new THREE.Vector2(0.88, 1.32)
-    ];
-    const bellGeo = new THREE.LatheGeometry(bellProfile, 24);
-    bellGeo.rotateX(-Math.PI / 2);
-
-    for (const side of [-0.96, 0.96]) {
-      const bell = new THREE.Mesh(
-        bellGeo,
-        new THREE.MeshStandardMaterial({
-          color: '#4e5d78',
-          metalness: 0.82,
-          roughness: 0.25,
-          side: THREE.DoubleSide
-        })
-      );
-      bell.position.set(side, 0, 0);
-
-      // Cooling coil ring on nozzle exterior
-      const coil = new THREE.Mesh(
-        new THREE.TorusGeometry(0.68, 0.055, 8, 22),
-        new THREE.MeshStandardMaterial({ color: '#d98448', metalness: 0.8, roughness: 0.28 })
-      );
-      coil.position.z = -0.72;
-      bell.add(coil);
-
-      const coreGlow = new THREE.Mesh(
-        new THREE.CircleGeometry(0.74, 20),
-        new THREE.MeshBasicMaterial({ color: '#2b2433', side: THREE.DoubleSide })
-      );
-      coreGlow.position.set(side, 0, -1.24);
-
-      // Dual-layered glowing plasma exhaust plume (bright white-cyan core + magenta sheath)
-      const plumeGroup = new THREE.Group();
-      plumeGroup.position.set(side, 0, -1.3);
-      const outerCone = new THREE.Mesh(
-        new THREE.ConeGeometry(0.72, 3.8, 18, 1, true),
-        new THREE.MeshBasicMaterial({
-          color: '#ff66d4',
-          transparent: true,
-          opacity: 0.78,
-          side: THREE.DoubleSide,
-          depthWrite: false
-        })
-      );
-      outerCone.rotation.x = -Math.PI / 2;
-      outerCone.position.z = -1.9;
-
-      const innerCone = new THREE.Mesh(
-        new THREE.ConeGeometry(0.38, 2.5, 14),
-        new THREE.MeshBasicMaterial({
-          color: '#ffffff',
-          transparent: true,
-          opacity: 0.95,
-          depthWrite: false
-        })
-      );
-      innerCone.rotation.x = -Math.PI / 2;
-      innerCone.position.z = -1.25;
-
-      plumeGroup.add(outerCone, innerCone);
-      plumeGroup.visible = false;
-
-      this.engineGroup.add(bell, coreGlow, plumeGroup);
-      this.engineNozzles.push({ bell, coreGlow });
-      this.enginePlumes.push(plumeGroup);
-    }
-    this.hullPivot.add(this.engineGroup);
-
-    // Low-profile flush Repair Target Holographic Floor Pads (zero wheel clipping when driven over)
-    for (const target of Object.values(REPAIR_TARGETS)) {
-      const padGroup = new THREE.Group();
-      const baseRing = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.56, 0.64, 0.035, 20),
-        darkFrameMat
-      );
-      const glowDisc = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.42, 0.42, 0.048, 20),
-        new THREE.MeshStandardMaterial({
-          color: '#ff9d3b',
-          emissive: '#ff6a00',
-          emissiveIntensity: 1.8,
-          roughness: 0.25
-        })
-      );
-      padGroup.add(baseRing, glowDisc);
-      const gy = getTerrainHeight(target.position.x, target.position.z, false);
-      padGroup.position.set(target.position.x, gy - this.baseGroundY + 0.018, target.position.z);
-      this.group.add(padGroup);
-      this.repairMarkers.set(target.id, { group: padGroup, glowDisc });
-    }
+    return buildSpacecraftRepairModules(this);
   }
-
   _buildPreflightAndRamp() {
     for (const chk of PREFLIGHT_CHECKS) {
       const cy = getTerrainHeight(chk.position.x, chk.position.z, false);
@@ -788,10 +555,15 @@ export class SpacecraftBuilder {
       pGroup.position.set(chk.position.x, cy - this.baseGroundY, chk.position.z);
 
       const stem = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.12, 0.22, 0.72, 10),
+        new THREE.CylinderGeometry(0.12, 0.22, 0.76, 10),
         new THREE.MeshStandardMaterial({ color: '#394659', metalness: 0.6, roughness: 0.4 })
       );
-      stem.position.y = 0.36;
+      stem.position.y = 0.38;
+      const cup = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.18, 0.12, 0.12, 10),
+        new THREE.MeshStandardMaterial({ color: '#4d5d75', metalness: 0.65, roughness: 0.35 })
+      );
+      cup.position.y = 0.76;
 
       const beacon = new THREE.Mesh(
         new THREE.OctahedronGeometry(0.26, 0),
@@ -802,37 +574,272 @@ export class SpacecraftBuilder {
         })
       );
       beacon.position.y = 0.92;
-      pGroup.add(stem, beacon);
+      pGroup.add(stem, cup, beacon);
       pGroup.visible = false;
       this.group.add(pGroup);
       this.preflightMeshes.set(chk.id, { group: pGroup, beacon });
     }
 
-    // Illuminated Boarding Ramp with side guide rails
+    // Illuminated Boarding Ramp with hull threshold bridge & side guide rails
     this.boardingRamp = new THREE.Group();
+    const deckMat = new THREE.MeshStandardMaterial({
+      color: '#4b5c73',
+      metalness: 0.65,
+      roughness: 0.35
+    });
     const deck = new THREE.Mesh(
-      new RoundedBoxGeometry(1.36, 0.14, 2.9, 3, 0.04),
-      new THREE.MeshStandardMaterial({
-        color: '#4b5c73',
-        metalness: 0.65,
-        roughness: 0.35
-      })
+      new RoundedBoxGeometry(3.20, 0.14, 1.38, 3, 0.04),
+      deckMat
     );
+    const hingeBridge = new THREE.Mesh(
+      new RoundedBoxGeometry(0.65, 0.22, 1.44, 3, 0.04),
+      deckMat
+    );
+    hingeBridge.position.set(-1.28, -0.04, 0);
     const railMat = new THREE.MeshStandardMaterial({
       color: '#6cf7ff',
       emissive: '#00b7ff',
       emissiveIntensity: 1.9
     });
-    for (const rx of [-0.62, 0.62]) {
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.12, 2.85), railMat);
-      rail.position.set(rx, 0.11, 0);
+    for (const rz of [-0.63, 0.63]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(3.12, 0.12, 0.07), railMat);
+      rail.position.set(0, 0.11, rz);
       this.boardingRamp.add(rail);
     }
-    this.boardingRamp.add(deck);
-    this.boardingRamp.position.set(2.92, 0.68, 1.5);
-    this.boardingRamp.rotation.z = -0.38;
+    this.boardingRamp.add(deck, hingeBridge);
+    this.boardingRamp.position.set(2.96, 0.62, 1.5);
+    this.boardingRamp.rotation.z = -0.44;
     this.boardingRamp.visible = false;
     this.hullPivot.add(this.boardingRamp);
+
+    // Recessed starboard airlock with two sliding leaves, using the same
+    // titanium, copper and cyan vocabulary as the existing hull.
+    this.airlock = new THREE.Group();
+    this.airlock.position.set(2.34, 2.35, 1.5);
+    const recess = new THREE.Mesh(new RoundedBoxGeometry(0.08, 2.48, 1.5, 3, 0.12),
+      new THREE.MeshStandardMaterial({ color: '#101c27', roughness: 0.82, metalness: 0.45 }));
+    this.airlock.add(recess);
+    this.airlockLeaves = [];
+    for (const sign of [-1, 1]) {
+      const leaf = new THREE.Mesh(new RoundedBoxGeometry(0.14, 2.4, 0.7, 3, 0.08), deckMat);
+      leaf.position.set(0.09, 0, sign * 0.355);
+      const edge = new THREE.Mesh(new THREE.BoxGeometry(0.025, 2.16, 0.035), railMat);
+      edge.position.set(0.08, 0, -sign * 0.31);
+      leaf.add(edge);
+      this.airlock.add(leaf);
+      this.airlockLeaves.push(leaf);
+    }
+    this.hullPivot.add(this.airlock);
+  }
+
+  prepareBoarding(robot) {
+    if (robot.worldPlane === 'homeworld' || isHomeworldContext(null, robot.position.y)) {
+      this._boardingStart.set(4.45, this.baseGroundY, 1.5);
+    } else {
+      this._boardingStart.copy(robot.position);
+    }
+    robot.group.updateWorldMatrix(true, true);
+    this._boardingInverse.copy(robot.group.matrixWorld).invert();
+    this._boardingBounds.makeEmpty();
+    robot.group.traverse((part) => {
+      if (!part.isMesh || part.material === robot.headlampConeMat) return;
+      let ancestor = part;
+      while (ancestor !== robot.group) {
+        if (!ancestor.visible) return;
+        ancestor = ancestor.parent;
+      }
+      if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
+      this._boardingPartMatrix.multiplyMatrices(this._boardingInverse, part.matrixWorld);
+      this._boardingPartBounds.copy(part.geometry.boundingBox).applyMatrix4(this._boardingPartMatrix);
+      this._boardingBounds.union(this._boardingPartBounds);
+    });
+    this._boardingBackExtent = Math.max(0.75, -this._boardingBounds.min.z);
+    this._boardingInsideX = Math.min(0.95, 2.34 - this._boardingBackExtent - 0.22);
+    this.resetHomeworldCeremony?.();
+  }
+
+  _setAirlockOpen(amount) {
+    this._airlockOpenAmount = amount;
+    for (let i = 0; i < this.airlockLeaves.length; i++) {
+      const sign = i === 0 ? -1 : 1;
+      this.airlockLeaves[i].position.z = sign * (0.355 + amount * 0.69);
+    }
+  }
+
+  _rampFootHeight(x) {
+    const deck = 0.62 - (x - 2.96) * Math.tan(0.44) + 0.07 / Math.cos(0.44);
+    return Math.max(0, deck + 0.002);
+  }
+
+  _buildHyperspaceTunnel() {
+    const streakCount = 90;
+    const positions = new Float32Array(streakCount * 6);
+    const colors = new Float32Array(streakCount * 6);
+    const c1 = new THREE.Color('#6dfce8');
+    const c2 = new THREE.Color('#c98cff');
+
+    for (let i = 0; i < streakCount; i++) {
+      const a = (i / streakCount) * Math.PI * 2 + (i % 7) * 0.21;
+      const rad = 5.5 + (i % 9) * 1.15;
+      const x = Math.cos(a) * rad;
+      const y = 2.25 + Math.sin(a) * rad * 0.72;
+      const zStart = -18 + (i % 13) * 3.2;
+      const len = 7.5 + (i % 5) * 2.8;
+
+      const idx = i * 6;
+      positions[idx] = x;
+      positions[idx + 1] = y;
+      positions[idx + 2] = zStart;
+      positions[idx + 3] = x;
+      positions[idx + 4] = y;
+      positions[idx + 5] = zStart + len;
+
+      const col = i % 2 === 0 ? c1 : c2;
+      colors[idx] = col.r;
+      colors[idx + 1] = col.g;
+      colors[idx + 2] = col.b;
+      colors[idx + 3] = 1.0;
+      colors[idx + 4] = 1.0;
+      colors[idx + 5] = 1.0;
+    }
+
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    lineGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    this.warpTunnelMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    this.warpTunnelLines = new THREE.LineSegments(lineGeo, this.warpTunnelMat);
+    this.warpTunnelLines.visible = false;
+    this.hullPivot.add(this.warpTunnelLines);
+  }
+
+  /**
+   * Keep the boarding beat in world space while the launch cutscene owns the
+   * robot transform. The old flow teleported Milo to the hatch and hid him at
+   * 52% of Act 1, which made the player read it as a pop rather than boarding.
+   */
+  _applyRobotBoardingPose(robot, progress) {
+    const p = clamp(progress, 0, 1);
+    const approachP = smoothstep(0, 0.22, p);
+    const walkP = smoothstep(0.22, 0.62, p);
+    const enterP = smoothstep(0.62, 0.82, p);
+    const hatchP = smoothstep(0.88, 0.99, p);
+    const bob = Math.sin(walkP * Math.PI) * 0.025;
+    const x = p < 0.22 ? lerp(this._boardingStart.x, 4.45, approachP)
+      : p < 0.62 ? lerp(4.45, 2.12, walkP) : lerp(2.12, this._boardingInsideX, enterP);
+    const z = lerp(this._boardingStart.z, 1.5, approachP);
+    const y = p < 0.22 ? lerp(this._boardingStart.y, this.baseGroundY, approachP)
+      : this.baseGroundY + this._rampFootHeight(Math.max(2.12, x));
+
+    const fullyInside = x + this._boardingBackExtent + 0.12 < 2.34;
+    robot.group.visible = !(fullyInside && p >= 0.985);
+    robot.group.position.set(x, y, z);
+    robot.group.rotation.set(0, -Math.PI / 2, Math.sin(walkP * Math.PI) * 0.035);
+    robot.group.scale.setScalar(1);
+    this._setAirlockOpen(smoothstep(0, 0.16, p) * (1 - (fullyInside ? hatchP : 0)));
+    this.boardingRamp.visible = p < 0.995;
+    if (robot.guideRig) robot.guideRig.visible = false;
+
+    // A small forward lean and arm tuck sells the threshold step without
+    // introducing a second animation system for this one cinematic beat.
+    if (robot.bodyPivot) {
+      robot.bodyPivot.position.y = bob;
+      robot.bodyPivot.rotation.x = lerp(0.04, -0.16, hatchP);
+    }
+    if (robot.headGroup) {
+      robot.headGroup.rotation.x = lerp(0, -0.12, hatchP);
+      robot.headGroup.rotation.z = Math.sin(walkP * Math.PI) * 0.06;
+    }
+    if (robot.leftArm) robot.leftArm.rotation.x = lerp(0.12, 0.44, walkP);
+    if (robot.rightArm) robot.rightArm.rotation.x = lerp(-0.12, 0.44, walkP);
+
+    if (robot.groundShadowMesh) {
+      robot.groundShadowMesh.visible = robot.group.visible && hatchP < 0.54;
+      robot.groundShadowMesh.position.set(x, this.baseGroundY + 0.035, z);
+    }
+  }
+
+  /**
+   * Reveal Milo from the landed ship through the visible boarding ramp. The
+   * reveal waits for touchdown, scales from the hatch depth, then hands off to
+   * a short walk and celebration so the ending never pops the character in.
+   */
+  _applyRobotExitPose(robot, progress) {
+    const p = clamp(progress, 0, 1);
+    const hatchP = smoothstep(0, 0.13, p);
+    const revealP = smoothstep(0.13, 0.38, p);
+    const walkP = smoothstep(0.38, 1, p);
+    const bob = Math.sin(revealP * Math.PI) * 0.025;
+    this._exitWalk.getPoint(walkP, this._exitPoint);
+    this._exitWalk.getPoint(Math.max(0, walkP - 0.0001), this._exitBefore);
+    this._exitWalk.getPoint(Math.min(1, walkP + 0.0001), this._exitAfter);
+    this._exitTangent.subVectors(this._exitAfter, this._exitBefore).normalize();
+    const x = p < 0.13 ? lerp(this._boardingInsideX, 2.12, hatchP)
+      : p < 0.38 ? lerp(2.12, 4.45, revealP) : this._exitPoint.x;
+    const z = p < 0.38 ? -0.7 : this._exitPoint.z;
+    const groundY = getHomeworldGroundHeight(x, z);
+    const y = groundY + (p < 0.38 ? this._rampFootHeight(Math.max(2.12, x)) : 0);
+
+    robot.group.visible = p > 0.015;
+    robot.group.position.set(x, y, z);
+    const walkYaw = Math.atan2(this._exitTangent.x, this._exitTangent.z);
+    robot.group.rotation.set(0, p < 0.38 ? Math.PI / 2 : lerp(walkYaw, 0, smoothstep(0.88, 1, p)), 0);
+    robot.group.scale.setScalar(1);
+    this._setAirlockOpen(smoothstep(0, 0.06, p) * (1 - smoothstep(0.43, 0.58, p)));
+    this.boardingRamp.visible = p < 0.6;
+    if (robot.guideRig) robot.guideRig.visible = false;
+
+    if (robot.bodyPivot) {
+      robot.bodyPivot.position.y = bob + Math.sin(walkP * Math.PI * 2) * 0.025;
+      robot.bodyPivot.rotation.x = lerp(-0.18, walkP > 0.78 ? 0 : 0.10, revealP);
+    }
+    if (robot.headGroup) {
+      robot.headGroup.rotation.x = lerp(-0.1, -0.03, revealP);
+      robot.headGroup.rotation.z = Math.sin(walkP * Math.PI * 2) * 0.045;
+    }
+    if (robot.leftArm) robot.leftArm.rotation.x = lerp(0.46, Math.sin(walkP * Math.PI * 5) * 0.26, revealP);
+    if (robot.rightArm) robot.rightArm.rotation.x = lerp(0.46, -Math.sin(walkP * Math.PI * 5) * 0.26, revealP);
+
+    if (robot.groundShadowMesh) {
+      robot.groundShadowMesh.visible = p > 0.28;
+      robot.groundShadowMesh.position.set(x, groundY + 0.035, z);
+    }
+  }
+
+  ensureHomeworldScene() {
+    if (this.homeworldGroup) return false;
+    this._buildHomeworldScene();
+    return true;
+  }
+
+  disposeHomeworldScene(renderer = null) {
+    if (!this.homeworldGroup) return false;
+    const sharedTextures = new Set();
+    if (this.pbrLibrary && typeof this.pbrLibrary === 'object') {
+      for (const entry of Object.values(this.pbrLibrary)) {
+        if (!entry || typeof entry !== 'object') continue;
+        for (const tex of Object.values(entry)) {
+          if (tex && tex.isTexture) sharedTextures.add(tex);
+        }
+      }
+    }
+    disposeObjectSubtree(this.homeworldGroup, { renderer, sharedTextures });
+    this.homeworldGroup = null;
+    this.homeworldColliders = [];
+    this.homeworldCameraOccluders = [];
+    this.homeworldTurbineRotor = null;
+    this.homeworldActivityVisuals = null;
+    this.crewFigures = [];
+    this.companionBots = [];
+    this.homeworldCeremony = null;
+    this.homeworldEnhancements = null;
+    this._homeworldActivityMask = -1;
+    return true;
   }
 
   _buildHomeworldScene() {
@@ -841,149 +848,108 @@ export class SpacecraftBuilder {
     this.homeworldGroup.position.set(0, 420, 0);
     this.homeworldGroup.visible = false;
     this.scene.add(this.homeworldGroup);
+    this.homeworldColliders = [];
 
-    // Rolling emerald meadow with outer hill rim
-    const meadow = new THREE.Mesh(
-      new THREE.CylinderGeometry(52, 54, 2.0, 48),
-      new THREE.MeshStandardMaterial({ color: '#47c472', roughness: 0.86, metalness: 0.02 })
-    );
-    meadow.position.y = -1.0;
-    meadow.receiveShadow = true;
-    this.homeworldGroup.add(meadow);
+    const landscape = buildHomeworldLandscape(this.homeworldGroup, this.homeworldColliders, this.pbrLibrary);
+    this.homeworldTurbineRotor = landscape.turbineRotor;
+    this.homeworldActivityVisuals = landscape;
+    this.homeworldCameraOccluders = landscape.cameraOccluders || [];
+    this._homeworldActivityMask = -1;
+    this._homeworldStageColor = new THREE.Color();
+    const meadowFlowerMat = landscape.flowerMaterial;
 
-    // Decorative landing pad with concentric beacon ring
-    const pad = new THREE.Mesh(
-      new THREE.CylinderGeometry(6.0, 6.4, 0.2, 36),
-      new THREE.MeshStandardMaterial({ color: '#e3ecf5', roughness: 0.42, metalness: 0.35 })
-    );
-    pad.position.y = 0.09;
-    pad.receiveShadow = true;
-    const padRing = new THREE.Mesh(
-      new THREE.RingGeometry(4.7, 5.05, 36),
-      new THREE.MeshBasicMaterial({ color: '#52ffb8', side: THREE.DoubleSide })
-    );
-    padRing.rotation.x = -Math.PI / 2;
-    padRing.position.y = 0.21;
-    this.homeworldGroup.add(pad, padRing);
+    // Tailored colony crew and two function-specific utility rovers share the
+    // spacecraft's ceramic/alloy PBR language, with static equipment batched.
+    const characters = buildHomeworldCharacters(this.homeworldGroup, this.homeworldColliders, this.pbrLibrary);
+    this.crewFigures = characters.crew;
+    this.companionBots = characters.bots;
+    this.homeworldCeremony = characters.ceremony;
 
-    // Cozy Architectural Habitat Cottage with warm glowing windows & roof ring
-    const cottageGroup = new THREE.Group();
-    cottageGroup.position.set(-9.8, 0, -7.2);
-    const dome = new THREE.Mesh(
-      new THREE.SphereGeometry(3.5, 28, 18, 0, Math.PI * 2, 0, Math.PI * 0.54),
-      new THREE.MeshStandardMaterial({ color: '#fff9ee', roughness: 0.45 })
-    );
-    dome.castShadow = true;
-    const roofTrim = new THREE.Mesh(
-      new THREE.TorusGeometry(2.35, 0.14, 10, 28),
-      new THREE.MeshStandardMaterial({ color: '#ff9b42', roughness: 0.35 })
-    );
-    roofTrim.rotation.x = Math.PI / 2;
-    roofTrim.position.y = 2.55;
-    const doorGlow = new THREE.Mesh(
-      new RoundedBoxGeometry(1.35, 1.95, 0.4, 4, 0.15),
-      new THREE.MeshStandardMaterial({
-        color: '#ffe078',
-        emissive: '#ffaa22',
-        emissiveIntensity: 1.6
-      })
-    );
-    doorGlow.position.set(2.3, 0.95, 2.1);
-    doorGlow.rotation.y = 0.72;
-    cottageGroup.add(dome, roofTrim, doorGlow);
-    this.homeworldGroup.add(cottageGroup);
+    // Build the inhabited settlement layer after the landing pad and meadow base so
+    // its colliders are returned through the same authoritative spacecraft registry.
+    this.homeworldEnhancements = buildHomeworldEnhancements(this.homeworldGroup, this.homeworldColliders, this.pbrLibrary);
+  }
 
-    // Sparkling crystal pond with stone bank
-    const pond = new THREE.Mesh(
-      new THREE.CircleGeometry(4.8, 32),
-      new THREE.MeshPhysicalMaterial({
-        color: '#4ad4ff',
-        roughness: 0.06,
-        metalness: 0.15,
-        clearcoat: 1.0
-      })
-    );
-    pond.rotation.x = -Math.PI / 2;
-    pond.position.set(10.8, 0.06, -5.2);
-    this.homeworldGroup.add(pond);
+  resetHomeworldCeremony() {
+    resetColonyCeremony(this.homeworldCeremony);
+  }
 
-    // Multi-layered stylized canopy trees & meadow blossoms
-    const treePositions = [
-      [-14.5, -1.5], [-12.2, 6.2], [-5.2, -13.5],
-      [6.2, -13.2], [14.5, -0.8], [12.5, 7.2], [-15.5, -10.2]
-    ];
-    const trunkMat = new THREE.MeshStandardMaterial({ color: '#7d5036', roughness: 0.85 });
-    const crownMat1 = new THREE.MeshStandardMaterial({ color: '#2eb865', roughness: 0.72 });
-    const crownMat2 = new THREE.MeshStandardMaterial({ color: '#5ce085', roughness: 0.68 });
+  startHomeworldCeremony() {
+    startColonyCeremony(this.homeworldCeremony);
+  }
 
-    for (const [tx, tz] of treePositions) {
-      const tg = new THREE.Group();
-      tg.position.set(tx, 0, tz);
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.38, 1.9, 10), trunkMat);
-      trunk.position.y = 0.95;
-      trunk.castShadow = true;
+  notifyHomeworldPlayerArrived(x, z) {
+    notifyColonyPlayerArrived(this.homeworldCeremony, x, z);
+  }
 
-      const c1 = new THREE.Mesh(new THREE.DodecahedronGeometry(1.45, 1), crownMat1);
-      c1.position.y = 2.35;
-      c1.castShadow = true;
-      const c2 = new THREE.Mesh(new THREE.DodecahedronGeometry(1.05, 1), crownMat2);
-      c2.position.set(0.35, 3.25, 0.2);
-      c2.castShadow = true;
-      tg.add(trunk, c1, c2);
-      this.homeworldGroup.add(tg);
+  _updateHomeworldActivityVisuals(dt, elapsed = 0) {
+    const visuals = this.homeworldActivityVisuals;
+    const survey = this.state.homeworldSurvey;
+    if (!visuals) return;
+    if (visuals.waterUniforms) {
+      visuals.waterUniforms.uTime.value = elapsed;
     }
-
-    // Expressive Companion Bots with happy glowing LED visors, ears & antennas!
-    const happyVisor = createVisorCanvas();
-    happyVisor.drawMood('celebrate', false);
-
-    this.companionBots = [];
-    for (const [bx, bz, col] of [
-      [-4.8, 5.2, '#4ad8ff'],
-      [4.9, 5.0, '#ff8ec0']
-    ]) {
-      const bg = new THREE.Group();
-      bg.position.set(bx, 0, bz);
-      bg.lookAt(0, 0, 2.2);
-
-      const shellMat = new THREE.MeshPhysicalMaterial({
-        color: '#f8fafd',
-        roughness: 0.22,
-        clearcoat: 0.9
-      });
-      const trimMat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.32 });
-
-      const body = new THREE.Mesh(new THREE.SphereGeometry(0.46, 20, 16), shellMat);
-      body.position.y = 0.65;
-      const band = new THREE.Mesh(new THREE.TorusGeometry(0.41, 0.07, 10, 22), trimMat);
-      band.rotation.x = Math.PI / 2;
-      band.position.y = 0.88;
-      const head = new THREE.Mesh(
-        new RoundedBoxGeometry(0.76, 0.62, 0.68, 5, 0.22),
-        shellMat
-      );
-      head.position.y = 1.28;
-      const face = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.54, 0.28),
-        new THREE.MeshBasicMaterial({ map: happyVisor.texture })
-      );
-      face.position.set(0, 1.28, 0.35);
-      const ant = new THREE.Mesh(
-        new THREE.SphereGeometry(0.08, 10, 8),
-        new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 1.8 })
-      );
-      ant.position.set(0, 1.72, 0);
-
-      bg.add(body, band, head, face, ant);
-      this.homeworldGroup.add(bg);
-      this.companionBots.push(bg);
+    if (!survey) return;
+    const records = survey.records;
+    const atmoMode =
+      typeof this.state.getHomeworldAtmosphere === 'function'
+        ? this.state.getHomeworldAtmosphere()
+        : 'dawn';
+    const atmoCode = atmoMode === 'night' ? 2 : atmoMode === 'sunset' ? 1 : 0;
+    const mask = Number(records.observatory) | (Number(records.nursery) << 1) |
+      (Number(records.energy) << 2) | (survey.calibration << 3) | (Number(survey.completed) << 6) |
+      (atmoCode << 7);
+    if (mask !== this._homeworldActivityMask) {
+      this._homeworldActivityMask = mask;
+      const atmoBoost = atmoMode === 'night' ? 1.45 : atmoMode === 'sunset' ? 1.22 : 1.0;
+      for (const id of ['observatory', 'nursery', 'energy']) {
+        const material = visuals.activityLights?.[id]?.material;
+        if (!material) continue;
+        const complete = id === 'energy' ? survey.calibration === 3 : records[id];
+        material.color.set(complete ? '#6effc8' : '#ffd275');
+        material.emissive.set(complete ? '#14c986' : '#cc8822');
+        material.emissiveIntensity = (complete ? 1.45 : 0.72) * atmoBoost;
+      }
+      if (visuals.energyStageLights) {
+        for (let i = 0; i < 3; i++) {
+          this._homeworldStageColor.set(i < survey.calibration ? '#66ffc2' : '#8a7a52');
+          visuals.energyStageLights.setColorAt(i, this._homeworldStageColor);
+        }
+        visuals.energyStageLights.instanceColor.needsUpdate = true;
+      }
+      if (visuals.observatoryHoloRig) {
+        visuals.observatoryHoloRig.visible = Boolean(records.observatory);
+      }
+      if (visuals.nurseryBioRig) {
+        visuals.nurseryBioRig.visible = Boolean(records.nursery);
+      }
+      if (visuals.valleyLampMat) {
+        const gridOnline = survey.calibration === 3;
+        visuals.valleyLampMat.color.set(gridOnline ? '#fff3cc' : '#e8d5ad');
+        visuals.valleyLampMat.emissive.set(gridOnline ? '#ffb838' : '#dba767');
+        const baseLamp = gridOnline ? 1.95 : 0.68;
+        visuals.valleyLampMat.emissiveIntensity =
+          atmoMode === 'night'
+            ? baseLamp * 1.65
+            : atmoMode === 'sunset'
+              ? baseLamp * 1.32
+              : baseLamp;
+      }
+    }
+    if (visuals.observatoryHoloRig && visuals.observatoryHoloRig.visible) {
+      visuals.observatoryHoloRig.rotation.y += dt * 0.75;
+    }
+    if (visuals.nurseryBioRig && visuals.nurseryBioRig.visible) {
+      visuals.nurseryBioRig.rotation.y -= dt * 0.65;
+    }
+    if (visuals.energyRotor) {
+      visuals.energyRotor.rotation.x += dt * (survey.calibration === 3 ? 1.85 : 0.22);
     }
   }
 
   setThrusterPlumes(active, scale = 1.0) {
     for (const p of this.enginePlumes) {
-      p.visible = active;
-      p.scale.set(1, 1, scale);
+      p.userData.targetThrottle = active ? Math.max(0, scale) : 0;
     }
   }
 
@@ -995,8 +961,36 @@ export class SpacecraftBuilder {
     this.hullPivot.rotation.z += (targetRoll - this.hullPivot.rotation.z) * Math.min(1, dt * 4);
     this.hullPivot.rotation.x += (targetPitch - this.hullPivot.rotation.x) * Math.min(1, dt * 4);
 
-    // Only re-apply ship system material colors when repair bitmask actually changes!
-    const repairKey = `${r.repair_power ? 1 : 0}${r.repair_comms ? 1 : 0}${r.repair_lifesupport ? 1 : 0}${r.repair_nav ? 1 : 0}${r.repair_propulsion ? 1 : 0}`;
+    for (const plume of this.enginePlumes) {
+      updateThrusterPlume(plume, dt, elapsed);
+    }
+    this.ascentShieldDomeMat.uniforms.uTime.value = elapsed;
+
+    // Articulate telescopic hydraulic landing gear so all 4 foot pads sit flush on sand under crash tilt!
+    if (this.landingStruts) {
+      const roll = this.hullPivot.rotation.z;
+      const pitch = this.hullPivot.rotation.x;
+      const retract = this._gearRetract || 0;
+      const onHomePad = this.homeworldGroup && this.homeworldGroup.visible && !inCutscene;
+      for (const st of this.landingStruts) {
+        const tiltDy = inCutscene || onHomePad ? 0 : st.lx * Math.sin(roll) - st.lz * Math.sin(pitch);
+        const deployedPadY = (inCutscene || onHomePad ? 0 : st.groundOffset - tiltDy) + 0.08;
+        const padY = lerp(deployedPadY, 0.92, retract);
+        st.pad.position.y = padY;
+        st.pad.rotation.z = inCutscene || onHomePad ? 0 : -roll;
+        st.pad.rotation.x = inCutscene || onHomePad ? 0 : -pitch;
+        const topAnchorY = 1.05;
+        const span = Math.max(0.16, topAnchorY - padY);
+        st.piston.scale.y = span;
+        st.piston.position.y = padY + span * 0.5;
+      }
+    }
+
+    // Dynamically compute repair state bitmask across all REPAIR_TARGETS
+    let repairKey = 0;
+    for (let i = 0; i < this._repairIds.length; i++) {
+      if (r[this._repairIds[i]]) repairKey |= (1 << i);
+    }
     if (this._lastRepairKey !== repairKey) {
       this._lastRepairKey = repairKey;
 
@@ -1022,6 +1016,14 @@ export class SpacecraftBuilder {
         nz.bell.visible = r.repair_propulsion;
         nz.coreGlow.material.color.set(r.repair_propulsion ? '#ff75d8' : '#2b2433');
       }
+
+      if (this.shieldCrownVisual) {
+        this.shieldCrownVisual.visible = Boolean(r.repair_shield);
+      }
+
+      if (this.hyperdriveRingGroup) {
+        this.hyperdriveRingGroup.visible = Boolean(r.repair_hyperdrive);
+      }
     }
 
     if (!r.repair_power) {
@@ -1031,8 +1033,8 @@ export class SpacecraftBuilder {
 
     // 2. Communications Visuals
     if (r.repair_comms) {
-      this.commsDishHead.rotation.x = -0.5;
-      this.commsDishHead.rotation.y = elapsed * 1.1;
+      this.commsDishHead.rotation.x = -0.42 + Math.sin(elapsed * 0.09) * 0.025;
+      this.commsDishHead.rotation.y = 0.35 + Math.sin(elapsed * 0.12) * 0.45;
       this.commsTipLight.visible = true;
       this.signalRings.forEach((ring, idx) => {
         ring.visible = true;
@@ -1049,21 +1051,40 @@ export class SpacecraftBuilder {
       });
     }
 
+    // The forward navigation projection is stowed on the homeworld apron;
+    // its rings otherwise occupy the traveller's welcome/footpath space.
+    const onHomePlane = Boolean(this.homeworldGroup && this.homeworldGroup.visible);
+    this.navHoloProjector.visible = Boolean(r.repair_nav && !onHomePlane);
     if (r.repair_nav) {
       this.navHoloProjector.rotation.z = elapsed * 1.3;
       this.navHoloProjector.rotation.y = Math.sin(elapsed * 0.9) * 0.35;
     }
 
-    if (!inCutscene) {
-      this.setThrusterPlumes(false);
+    if (r.repair_shield && this.shieldHaloRing) {
+      this.shieldHaloRing.rotation.z = elapsed * 1.6;
+      this.shieldHaloRing.position.y = 0.38 + Math.sin(elapsed * 2.8) * 0.05;
     }
 
-    // Update repair ground markers (dirty-checked!)
+    if (r.repair_hyperdrive && this.hyperdriveRingGroup) {
+      const spinSpeed = inCutscene === 'launch' ? 5.8 : 1.15;
+      this.hyperdriveRingGroup.rotation.z += dt * spinSpeed;
+    }
+
+    if (!inCutscene) {
+      this.setThrusterPlumes(false);
+      this._setAirlockOpen(0);
+      this.launchGroundWash.visible = false;
+      this._gearRetract = 0;
+      if (this.ascentShieldDome) this.ascentShieldDome.visible = false;
+      if (this.warpTunnelLines) this.warpTunnelLines.visible = false;
+    }
+
+    // Update repair ground markers (dirty-checked; hidden on Homeworld!)
     for (const [rId, mObj] of this.repairMarkers.entries()) {
       const target = REPAIR_TARGETS[rId];
       const repaired = Boolean(r[rId]);
       const activeForLevel = target.level <= this.state.currentLevel;
-      mObj.group.visible = activeForLevel && !inCutscene;
+      mObj.group.visible = activeForLevel && !inCutscene && !onHomePlane;
       const stateTag = repaired
         ? 2
         : this.state.getItemCount(target.requiredItem) > 0
@@ -1084,8 +1105,9 @@ export class SpacecraftBuilder {
       }
     }
 
-    // Update Pre-Flight Checkpoints & Boarding Ramp
-    const showPreflight = r.repair_propulsion && !inCutscene;
+    // Update Pre-Flight Checkpoints & Boarding Ramp (only once ALL ship systems are repaired!)
+    const showPreflight =
+      this.state.areAllShipSystemsRepaired() && !inCutscene && !onHomePlane;
     for (const [chkId, pObj] of this.preflightMeshes.entries()) {
       pObj.group.visible = showPreflight;
       if (showPreflight) {
@@ -1099,92 +1121,299 @@ export class SpacecraftBuilder {
       }
     }
     this.boardingRamp.visible =
-      this.state.canLaunchSpacecraft() || inCutscene === 'launch';
+      (this.state.canLaunchSpacecraft() && !inCutscene && !onHomePlane) ||
+      (inCutscene === 'launch' && !onHomePlane && (this._gearRetract || 0) < 0.15);
 
-    if (this.homeworldGroup.visible) {
-      this.companionBots.forEach((bot, i) => {
-        bot.position.y = Math.abs(Math.sin(elapsed * 7 + i * 1.4)) * 0.28;
-      });
+    if (onHomePlane) {
+      this._updateHomeworldActivityVisuals(dt, elapsed);
+      updateHomeworldCharacters(this.crewFigures, this.companionBots, elapsed, dt, this.homeworldCeremony);
+      if (this.homeworldTurbineRotor) {
+        this.homeworldTurbineRotor.rotation.z += dt * 1.8;
+      }
+      if (!this._hwEnhanceOpts) {
+        this._hwEnhanceOpts = {
+          surveyCompleted: false,
+          atmoMode: 'dawn',
+          flightRingsMap: null,
+          skyTrialHitSet: null,
+          nurseryBloomed: false
+        };
+      }
+      const opts = this._hwEnhanceOpts;
+      opts.surveyCompleted = Boolean(this.state.homeworldSurvey && this.state.homeworldSurvey.completed);
+      opts.atmoMode = typeof this.state.getHomeworldAtmosphere === 'function'
+        ? this.state.getHomeworldAtmosphere()
+        : 'dawn';
+      opts.flightRingsMap = this.state.homeworldSurvey?.flightRings || null;
+      opts.skyTrialHitSet = this.skyTrialHitSet || null;
+      opts.nurseryBloomed = Boolean(this.state.homeworldSurvey?.nurseryBloomed);
+      updateHomeworldEnhancements(this.homeworldEnhancements, elapsed, dt, opts);
     }
   }
 
-  applyCutsceneFrame(t, elapsed, robot) {
-    if (t < 0.22) {
-      const p = t / 0.22;
-      this.homeworldGroup.visible = false;
+  /**
+   * 4-Act Cinematic Launch & Hyperspace Homecoming (~22.4s):
+   * - Act 1 (0.00 -> 0.20): Milo boards ramp -> ramp stows -> twin bells roar & Photonic Shield Dome ignites!
+   * - Act 2 (0.20 -> 0.44): Liftoff & hydraulic gear retraction -> pierces Kharis-4 storm clouds into ringed planet orbit!
+   * - Act 3 (0.44 -> 0.58): Quantum Hyperdrive Ring spins up -> dazzling violet-cyan star-streak warp jump!
+   * - Act 4 (0.58 -> 1.00): Emerges into sunlit Homeworld Meadow (Y=420) -> gear deploys & retro-touchdown -> cheering crew & Milo reunion!
+   */
+  applyCutsceneFrame(t, elapsed, robot, camera = null) {
+    this.launchGroundWash.visible = t > 0.13 && t < 0.26;
+    this.launchGroundWash.material.uniforms.uProgress.value = clamp((t - 0.13) / 0.13, 0, 1);
+    this.launchGroundWash.material.uniforms.uTime.value = elapsed;
+    // Act 1: Boarding, Ignition & Photonic Shield Activation
+    if (t < 0.20) {
+      const p = t / 0.20;
+      if (this.homeworldGroup) this.homeworldGroup.visible = false;
+      this._gearRetract = 0;
       if (this.environments) this.scene.environment = this.environments.desert;
-      if (this.skyDome) this.skyDome.setMode('desert', 0);
+      if (this.skyDome) {
+        this.skyDome.group.position.y = 0;
+        this.skyDome.setMode('desert', 0);
+      }
       this.scene.fog.color.set('#d89c72');
-      this.scene.fog.density = 0.0024;
+      this.scene.fog.density = 0.0020;
 
-      this.group.position.set(0, this.baseGroundY + Math.sin(elapsed * 45) * 0.03 * p, 0);
-      robot.group.visible = p < 0.65;
-      robot.group.position.set(lerp(3.2, 0.8, p), this.baseGroundY + lerp(0.1, 1.8, p), 1.6);
-      this.setThrusterPlumes(true, 0.4 + p * 1.1);
+      // Let Milo finish the visible ramp walk before the hull starts to lift.
+      // The previous 0.55 threshold made the ship rise under him while he was
+      // still being teleported into the hatch.
+      const lift = 0;
+      const rumble = Math.sin(elapsed * 52) * 0.02 * smoothstep(0.55, 0.8, p) * (1 - smoothstep(0.85, 1, p));
+      this.group.position.set(0, this.baseGroundY + lift + rumble, 0);
+      this.hullPivot.rotation.set(0, 0, 0);
 
+      this._applyRobotBoardingPose(robot, p);
+
+      this.setThrusterPlumes(true, smoothstep(0.53, 0.94, p) * 1.55);
+      if (this.ascentShieldDome) {
+        this.ascentShieldDome.visible = p > 0.35;
+        this.ascentShieldDomeMat.opacity = smoothstep(0.35, 0.95, p) * 0.28;
+      }
+      if (this.warpTunnelLines) this.warpTunnelLines.visible = false;
+
+      const camAngle = lerp(0.72, 0.28, p);
       return {
-        position: this._cutCamPos.set(11.5, 5.5, 11.5),
-        lookAt: this._cutCamLook.set(0, 2.5, 0)
+        position: this._cutCamPos.set(
+          Math.sin(camAngle) * 14.5,
+          this.baseGroundY + lerp(4.2, 5.8, p),
+          Math.cos(camAngle) * 14.5
+        ),
+        lookAt: this._cutCamLook.set(
+          lerp(0, 1.0, smoothstep(0.0, 0.72, p)),
+          this.baseGroundY + 2.4 + lift * 0.7,
+          0.65
+        )
       };
     }
 
-    if (t < 0.58) {
-      const p = (t - 0.22) / 0.36;
-      this.homeworldGroup.visible = false;
+    // Act 2: Supersonic Atmospheric Climb & Orbital Ringed-Planet Flyby
+    if (t < 0.44) {
+      const p = (t - 0.20) / 0.24;
+      if (this.homeworldGroup) this.homeworldGroup.visible = false;
       robot.group.visible = false;
+      this.boardingRamp.visible = false;
+      this._setAirlockOpen(0);
+      if (robot.groundShadowMesh) robot.groundShadowMesh.visible = false;
+      this._gearRetract = smoothstep(0.04, 0.45, p);
 
-      if (this.skyDome) this.skyDome.setMode('desert', clamp(p * 1.35, 0, 1));
-      this.scene.fog.color
-        .copy(this._skyDesertCol)
-        .lerp(this._skySpaceCol, clamp(p * 1.35, 0, 1));
-      this.scene.fog.density = lerp(0.0024, 0.0005, p);
+      const spaceBlend = smoothstep(0.08, 0.92, p);
+      if (this.skyDome) this.skyDome.setMode('desert', spaceBlend);
+      this.scene.fog.color.copy(this._skyDesertCol).lerp(this._skySpaceCol, spaceBlend);
+      this.scene.fog.density = lerp(0.0020, 0.0003, p);
 
-      const climbY = this.baseGroundY + Math.pow(p, 2.1) * 95;
-      this.group.position.set(0, climbY, p * 18);
-      this.hullPivot.rotation.x = -0.28 * Math.sin(p * Math.PI);
-      this.setThrusterPlumes(true, 1.45 + Math.sin(elapsed * 30) * 0.25);
+      const climbY = this.baseGroundY + Math.pow(p, 1.85) * 96;
+      const fwdZ = Math.pow(p, 1.4) * 22;
+      this.group.position.set(0, climbY, fwdZ);
+      this.hullPivot.rotation.set(-0.26 * Math.sin(p * Math.PI * 0.85), 0, Math.sin(p * Math.PI) * 0.08);
+      this.setThrusterPlumes(true, lerp(1.55, 2.0, smoothstep(0, 1, p)));
+
+      if (this.ascentShieldDome) {
+        this.ascentShieldDome.visible = true;
+        this.ascentShieldDomeMat.opacity = (1.0 - smoothstep(0.55, 1.0, p)) * 0.34;
+      }
+      if (this.warpTunnelLines) this.warpTunnelLines.visible = false;
 
       return {
-        position: this._cutCamPos.set(13 - p * 4, climbY + 4.5, p * 18 - 14),
-        lookAt: this._cutCamLook.set(0, climbY + 2.2, p * 18 + 2)
+        position: this._cutCamPos.set(
+          lerp(11.5, -8.5, p),
+          climbY + lerp(3.2, 5.4, p),
+          fwdZ + lerp(-12.5, -14.0, p)
+        ),
+        lookAt: this._cutCamLook.set(0, climbY + 2.3, fwdZ + 3.2)
       };
     }
 
+    // Act 3: Quantum Hyperdrive Jump Corridor across Starlight!
+    if (t < 0.58) {
+      const p = (t - 0.44) / 0.14;
+      if (this.homeworldGroup) this.homeworldGroup.visible = false;
+      robot.group.visible = false;
+      if (robot.groundShadowMesh) robot.groundShadowMesh.visible = false;
+      this._gearRetract = 1.0;
+
+      if (this.skyDome) this.skyDome.setMode('desert', 1.0);
+      this.scene.fog.color.copy(this._skySpaceCol);
+      this.scene.fog.density = 0.0002;
+
+      const warpY = this.baseGroundY + 110;
+      const warpZ = 24 + p * 42;
+      this.group.position.set(0, warpY, warpZ);
+      this.hullPivot.rotation.set(0, 0, Math.sin(p * Math.PI * 2) * 0.06);
+      this.setThrusterPlumes(true, 2.15 + Math.sin(p * Math.PI) * 0.15);
+
+      if (this.ascentShieldDome) {
+        this.ascentShieldDome.visible = true;
+        this.ascentShieldDomeMat.opacity = 0.22 + Math.sin(p * Math.PI) * 0.25;
+      }
+      if (this.warpTunnelLines) {
+        this.warpTunnelLines.visible = true;
+        this.warpTunnelLines.rotation.z = elapsed * 2.4;
+        this.warpTunnelLines.position.z = -((elapsed * 36) % 8.0);
+        this.warpTunnelMat.opacity = Math.sin(p * Math.PI) * 0.92;
+      }
+
+      return {
+        position: this._cutCamPos.set(
+          lerp(-6.2, 5.8, p),
+          warpY + 3.1,
+          warpZ - lerp(11.5, 8.8, p)
+        ),
+        lookAt: this._cutCamLook.set(0, warpY + 2.2, warpZ + 4.5)
+      };
+    }
+
+    // Act 4: Sunlit Homeworld Emerald Meadow Descent, Gear Deployment & Grand Reunion (t >= 0.58)!
+    this.ensureHomeworldScene();
     const p = (t - 0.58) / 0.42;
     this.homeworldGroup.visible = true;
+    if (this.ascentShieldDome) this.ascentShieldDome.visible = false;
+    if (this.warpTunnelLines) this.warpTunnelLines.visible = false;
+
     if (this.environments) this.scene.environment = this.environments.homeworld;
     if (this.skyDome) {
       this.skyDome.group.position.y = 420;
       this.skyDome.setMode('homeworld', 0);
     }
     this.scene.fog.color.set('#bceeff');
-    this.scene.fog.density = 0.0028;
+    this.scene.fog.density = HOMEWORLD_CONFIG.fogDensity;
 
     const homeY = 420;
-    const landFactor = 1 - Math.pow(1 - clamp(p * 1.45, 0, 1), 2.5);
-    const shipY = lerp(homeY + 18, homeY + 0.16, landFactor);
-    this.group.position.set(0, shipY, -1.5);
-    this.hullPivot.rotation.set(0, 0, 0);
-    this.setThrusterPlumes(p < 0.62, Math.max(0.1, 1 - p * 1.5));
+    if (p >= 0.645) this.startHomeworldCeremony?.();
+    this._gearRetract = 1.0 - smoothstep(0.05, 0.45, p);
+    const landFactor = 1 - Math.pow(1 - clamp(p * 1.55, 0, 1), 2.6);
+    const shipY = lerp(homeY + 19.5, HOMEWORLD_CONFIG.padY, landFactor);
+    const flarePitch = (1 - landFactor) * 0.14;
+    this.group.position.set(0, shipY, -2.2);
+    this.hullPivot.rotation.set(flarePitch, 0, 0);
+    this.setThrusterPlumes(p < 0.62, Math.max(0.12, (1 - p * 1.55) * 1.25));
 
-    if (p >= 0.65) {
-      robot.group.visible = true;
-      robot.group.position.set(0, homeY + Math.abs(Math.sin(elapsed * 9)) * 0.32, 4.4);
-      robot.group.rotation.set(0, 0, 0);
-      if (robot.groundShadowMesh) {
-        robot.groundShadowMesh.visible = true;
-        robot.groundShadowMesh.position.set(0, homeY + 0.04, 4.4);
-      }
-      robot.triggerAction('celebrate', 0.5);
+    // Do not reveal Milo until the landing struts are down and the hull is
+    // settled. Then ease him out of the hatch, down the ramp, and into a
+    // readable celebration pose instead of popping him into the meadow.
+    if (p >= 0.66) {
+      this._applyRobotExitPose(robot, (p - 0.66) / 0.34);
+      if ((p - 0.66) / 0.34 >= 0.985) this.notifyHomeworldPlayerArrived?.();
+      if (p > 0.91) robot.triggerAction('celebrate', 0.18);
     } else {
       robot.group.visible = false;
+      robot.group.scale.setScalar(1);
       if (robot.groundShadowMesh) robot.groundShadowMesh.visible = false;
     }
 
-    return {
-      position: this._cutCamPos.set(Math.sin(p * 0.8) * 9.5, homeY + 5.2, 13.5),
-      lookAt: this._cutCamLook.set(0, homeY + 1.8, 1.5)
-    };
+    // Hold one starboard-front viewing corridor through touchdown and the
+    // whole exit. The old 150-degree orbit crossed the commons and tree crowns.
+    const settle = smoothstep(0.20, 0.64, p);
+    const exitFrame = smoothstep(0.86, 1.0, p);
+    return this._fitHomeworldPartyFrame(camera,
+      lerp(0, 0.05, settle), homeY + lerp(3.0, 1.25, settle),
+      lerp(1.6, 6.75, settle), Math.PI - 0.75, Math.asin(0.62),
+      lerp(22.0, 8.0, settle), -4.35, lerp(5.4, 4.5, exitFrame),
+      lerp(-1.65, 4.45, exitFrame), 9.2);
+  }
+
+  enterHomeworldFreeRoam(robot) {
+    this.ensureHomeworldScene();
+    this.homeworldGroup.visible = true;
+    this._gearRetract = 0;
+    if (this.ascentShieldDome) this.ascentShieldDome.visible = false;
+    if (this.warpTunnelLines) this.warpTunnelLines.visible = false;
+    if (this.environments) this.scene.environment = this.environments.homeworld;
+    if (this.skyDome) {
+      this.skyDome.group.position.y = 420;
+      this.skyDome.setMode('homeworld', 0);
+    }
+    this.scene.fog.color.set('#bceeff');
+    this.scene.fog.density = HOMEWORLD_CONFIG.fogDensity;
+    this.group.position.set(0, HOMEWORLD_CONFIG.padY, -2.2);
+    this.hullPivot.rotation.set(0, 0, 0);
+    this.setThrusterPlumes(false);
+    robot.group.visible = true;
+    robot.group.scale.setScalar(1);
+    if (robot.bodyPivot) {
+      robot.bodyPivot.position.y = 0;
+      robot.bodyPivot.rotation.set(0, 0, 0);
+    }
+    if (robot.headGroup) robot.headGroup.rotation.set(0, 0, 0);
+    robot.teleportToHomeworldMeadow();
+  }
+
+  _fitHomeworldPartyFrame(camera, lookX, lookY, lookZ, azimuth, elevation,
+    minimumDistance, minX, maxX, minZ, maxZ, fitBlend = 1) {
+    const verticalTan = Math.tan((camera?.fov || 50) * Math.PI / 360);
+    const horizontalTan = verticalTan * (camera?.aspect || 16 / 9);
+    const cosElevation = Math.cos(elevation);
+    const dx = Math.sin(azimuth) * cosElevation;
+    const dy = Math.sin(elevation);
+    const dz = Math.cos(azimuth) * cosElevation;
+    const rightX = Math.cos(azimuth), rightZ = -Math.sin(azimuth);
+    const upX = -Math.sin(azimuth) * dy;
+    const upY = cosElevation;
+    const upZ = -Math.cos(azimuth) * dy;
+    let required = minimumDistance;
+    // Fit the actual party envelope, including boots, extended hands and Milo.
+    // Keeping look direction and retreat on this same basis prevents the old
+    // independently interpolated camera/look from sweeping everyone off-screen.
+    for (let corner = 0; corner < 8; corner++) {
+      const x = (corner & 1 ? maxX : minX) - lookX;
+      const y = HOMEWORLD_CONFIG.baseY + (corner & 2 ? 2.4 : 0) - lookY;
+      const z = (corner & 4 ? maxZ : minZ) - lookZ;
+      const depth = x * dx + y * dy + z * dz;
+      const horizontal = Math.abs(x * rightX + z * rightZ);
+      const vertical = Math.abs(x * upX + y * upY + z * upZ);
+      required = Math.max(required, depth + horizontal / (horizontalTan * 0.80),
+        depth + vertical / (verticalTan * 0.72));
+    }
+    const distance = lerp(minimumDistance, required, fitBlend);
+    this._cutCamLook.set(lookX, lookY, lookZ);
+    this._cutCamPos.set(lookX + dx * distance, lookY + dy * distance, lookZ + dz * distance);
+    return this._homeworldCameraPose;
+  }
+
+  applyHomeworldWelcomeFrame(age, robot, camera = null) {
+    const turn = smoothstep(0.4, 1.8, age);
+    const saluteReply = smoothstep(2.35, 2.95, age) * (1 - smoothstep(4.15, 4.85, age));
+    const nod = Math.sin(clamp((age - 3.2) / 0.9, 0, 1) * Math.PI) * 0.10;
+    robot.group.rotation.y = -0.85 * turn * (1 - smoothstep(7.4, 8.6, age));
+    if (robot.bodyPivot) {
+      robot.bodyPivot.position.y = 0;
+      robot.bodyPivot.rotation.x = nod * 0.3;
+    }
+    if (robot.headGroup) {
+      robot.headGroup.rotation.x = nod;
+      robot.headGroup.rotation.z = saluteReply * Math.sin(age * 4.5) * 0.035;
+    }
+    if (robot.rightArm) {
+      robot.rightArm.rotation.x = -1.85 * saluteReply;
+      robot.rightArm.rotation.z = Math.sin(age * 5.0) * 0.13 * saluteReply;
+    }
+    if (robot.leftArm) robot.leftArm.rotation.x = -0.2 * saluteReply;
+    // Lock the landing corridor composition throughout the welcome and ending.
+    // No orbit, zoom or changing target can carry the camera into a tree crown.
+    return this._fitHomeworldPartyFrame(camera,
+      0.05, HOMEWORLD_CONFIG.baseY + 1.25, 6.75,
+      Math.PI - 0.75, Math.asin(0.62), 8.0,
+      -4.35, 4.5, 4.45, 9.2);
   }
 
   /**
@@ -1194,7 +1423,8 @@ export class SpacecraftBuilder {
    * - Act 3 (0.66 -> 1.00): Panoramic sweep of intact Solar Furnace & Fabricator -> seamless blend into follow camera!
    */
   applyIntroCutsceneFrame(t, elapsed, robot, finalFollowPose) {
-    this.homeworldGroup.visible = false;
+    if (this.homeworldGroup) this.homeworldGroup.visible = false;
+    robot.group.scale.setScalar(1);
     if (this.environments) this.scene.environment = this.environments.desert;
     if (this.skyDome) {
       this.skyDome.group.position.y = 0;
@@ -1294,7 +1524,10 @@ export class SpacecraftBuilder {
   }
 
   restoreDesertPlacement(robot) {
-    this.homeworldGroup.visible = false;
+    if (this.homeworldGroup) this.homeworldGroup.visible = false;
+    this._gearRetract = 0;
+    if (this.ascentShieldDome) this.ascentShieldDome.visible = false;
+    if (this.warpTunnelLines) this.warpTunnelLines.visible = false;
     if (this.environments) this.scene.environment = this.environments.desert;
     if (this.skyDome) {
       this.skyDome.group.position.y = 0;
@@ -1303,8 +1536,15 @@ export class SpacecraftBuilder {
     this.scene.fog.color.set('#d89c72');
     this.scene.fog.density = 0.0012;
     this.group.position.set(0, this.baseGroundY, 0);
+    this.hullPivot.rotation.set(0, 0, 0);
     this.setThrusterPlumes(false);
     robot.group.visible = true;
+    robot.group.scale.setScalar(1);
+    if (robot.bodyPivot) {
+      robot.bodyPivot.position.y = 0;
+      robot.bodyPivot.rotation.set(0, 0, 0);
+    }
+    if (robot.headGroup) robot.headGroup.rotation.set(0, 0, 0);
     robot.teleportToHubSafe();
   }
 }
