@@ -176,7 +176,7 @@ node ../skills/game-web3d-standalone-builder/scripts/audit-standalone-html.mjs
 ### 新场景接入标准实施清单（Checklist）
 - [ ] **数据层**：在 `src/data/` 新增场景常量与文案，并在 `WORLD_ATMOSPHERE_PROFILES`（`src/systems/atmosphereProfiles.js`）注册昼夜/雾效/基准高度 `planeBaseY`。
 - [ ] **3D 场景与回收**：编写独立 `<world>Builder.js`，对碰撞体/遮挡体调用 `tagWorldEntries(..., '<worldId>')`；在 `main.js` 通过 `worldManager.register('<worldId>', ...)` 实现懒挂载与 `disposeObjectSubtree` 卸载。
-- [ ] **交互层**：交互扫描统一调用 `findNearestInteractable`（`src/systems/interactableScanner.js`），不重写距离轮询循环。
+- [ ] **实体与交互层**：通用伴行机器人/巡检无人机统一复用 `companionBotFactory.js`（`createHoverDroneMesh`、`createUtilityRoverBot`）按需挂载至当前场景组；交互扫描统一调用 `findNearestInteractable`（`src/systems/interactableScanner.js`），不重写距离轮询循环。
 - [ ] **HUD 层**：在 `HudController` 使用 `createCollapsibleDrawer` / `createJetpackPill` 创建该世界的抽屉与胶囊实例；在场景切换钩子中通过 `clearHudRegion` 清理旧世界残留，并确保次级操作默认折叠。
 - [ ] **门禁验证**：新增/更新对应回归测试脚本并跑通 `npm run gate`（语法、0 循环依赖、离线单文件审计与场景隔离断言）。
 

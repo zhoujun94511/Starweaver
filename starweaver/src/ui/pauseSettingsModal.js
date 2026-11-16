@@ -233,4 +233,22 @@ export function renderPauseModal(hud, homeworldHudCopy) {
   }
 
   hud.modalPanel.appendChild(actCol);
+
+  const metaVer =
+    typeof document !== 'undefined'
+      ? document.querySelector?.('meta[name="version"]')?.getAttribute?.('content')
+      : '';
+  const metaBuildTime =
+    typeof document !== 'undefined'
+      ? document.querySelector?.('meta[name="build-time"]')?.getAttribute?.('content')
+      : '';
+  const versionText = metaVer ? `v${metaVer}` : 'v1.2.0';
+  const formattedBuildTime = metaBuildTime
+    ? metaBuildTime.replace('T', ' ').slice(0, 16)
+    : 'dev';
+  const verLabel =
+    typeof hud.state.ui === 'function' ? hud.state.ui('versionLabel') : 'Build Version';
+  hud.modalPanel.appendChild(
+    el('div', 'modal-version-footer', `${verLabel}: ${versionText} · ${formattedBuildTime}`)
+  );
 }

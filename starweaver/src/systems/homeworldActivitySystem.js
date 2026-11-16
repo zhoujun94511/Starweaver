@@ -319,10 +319,12 @@ export class HomeworldActivitySystem {
         this.robot.triggerAerialRingBoost?.(38, 2.2);
         const res = this.state.recordHomeworldFlightRing(ring.id);
         this.sound?.playGather?.(true);
+        let handledSkyTrial = false;
         if (this.skyTrialActive) {
           this.skyTrialRingsHit.add(ring.id);
           if (this.skyTrialRingsHit.size >= HOMEWORLD_AERIAL_RINGS.length) {
             this.skyTrialActive = false;
+            handledSkyTrial = true;
             const tRes = this.state.recordHomeworldSkyTrial(this.skyTrialElapsed);
             this.robot.triggerAction?.('celebrate', 1.3);
             this.callbacks.onCelebrate?.(ring.x, ring.z, 'sky_trial_complete');
@@ -334,14 +336,13 @@ export class HomeworldActivitySystem {
               raw.replace('{sec}', String(tRes.sec)).replace('{bestTag}', bestTag),
               'celebrate'
             );
-            return true;
           }
         }
         if (res.unlockedJetflame) {
           this.robot.triggerAction?.('celebrate', 1.2);
           this.callbacks.onCelebrate?.(ring.x, ring.z, 'jetflame_unlocked');
           this._feedback(HOMEWORLD_COPY.allRingsUnlocked, 'celebrate');
-        } else if (res.firstTime) {
+        } else if (!handledSkyTrial && res.firstTime) {
           const raw = this.state.text(HOMEWORLD_COPY.ringBoostToast);
           this.callbacks.showToast?.(
             raw.replace('{done}', String(res.clearedCount)).replace('{total}', String(res.total)),

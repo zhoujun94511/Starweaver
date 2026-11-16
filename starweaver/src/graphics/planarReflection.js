@@ -71,6 +71,21 @@ export class PlanarReflectionSystem {
     }
   }
 
+  unregisterExcludedObject(obj) {
+    if (!obj) return;
+    const idx = this.excludeObjects.indexOf(obj);
+    if (idx !== -1) this.excludeObjects.splice(idx, 1);
+  }
+
+  unregisterWaterSurface(mesh) {
+    if (!mesh) return;
+    for (let i = this.pools.length - 1; i >= 0; i--) {
+      if (this.pools[i].mesh === mesh) {
+        this.pools.splice(i, 1);
+      }
+    }
+  }
+
   setQuality(quality, isMobile = false) {
     if (quality === 'low' || (isMobile && quality !== 'ultra')) {
       this.enabled = false;
@@ -368,7 +383,7 @@ export class PlanarReflectionSystem {
 
     // Throttle reflection rasterization to every 2nd frame unless in cutscene or Ultra
     this._frameCounter++;
-    if (!forceEveryFrame && this.resolutionScale < 0.65 && (this._frameCounter & 1) === 1 && this.sharedUniforms.uReflActive.value > 0.5 && this.activePool === bestPool) {
+    if (!forceEveryFrame && this.resolutionScale < 0.55 && (this._frameCounter & 1) === 1 && this.sharedUniforms.uReflActive.value > 0.5 && this.activePool === bestPool) {
       return;
     }
     this.activePool = bestPool;
@@ -421,17 +436,22 @@ export class PlanarReflectionSystem {
     );
 
     const proj = vCam.projectionMatrix.elements;
-    this._qVec.x = (Math.sign(this._clipVec.x) + proj[8]) / proj[0];
-    this._qVec.y = (Math.sign(this._clipVec.y) + proj[9]) / proj[5];
-    this._qVec.z = -1.0;
-    this._qVec.w = (1.0 + proj[10]) / proj[14];
+    if (Math.abs(proj[0]) > 1e-6 && Math.abs(proj[5]) > 1e-6 && Math.abs(proj[14]) > 1e-6) {
+      this._qVec.x = (Math.sign(this._clipVec.x) + proj[8]) / proj[0];
+      this._qVec.y = (Math.sign(this._clipVec.y) + proj[9]) / proj[5];
+      this._qVec.z = -1.0;
+      this._qVec.w = (1.0 + proj[10]) / proj[14];
 
-    this._clipVec.multiplyScalar(2.0 / this._clipVec.dot(this._qVec));
-    proj[2] = this._clipVec.x;
-    proj[6] = this._clipVec.y;
-    proj[10] = this._clipVec.z + 1.0 - 0.008;
-    proj[14] = this._clipVec.w;
-    vCam.projectionMatrixInverse.copy(vCam.projectionMatrix).invert();
+      const qDot = this._clipVec.dot(this._qVec);
+      if (Math.abs(qDot) > 1e-6) {
+        this._clipVec.multiplyScalar(2.0 / qDot);
+        proj[2] = this._clipVec.x;
+        proj[6] = this._clipVec.y;
+        proj[10] = this._clipVec.z + 1.0 - 0.008;
+        proj[14] = this._clipVec.w;
+        vCam.projectionMatrixInverse.copy(vCam.projectionMatrix).invert();
+      }
+    }
 
     // Hide pool meshes and 3D UI billboards/holograms while rendering reflection
     for (let i = 0; i < this.pools.length; i++) {
@@ -466,5 +486,15 @@ export class PlanarReflectionSystem {
       this.renderer.shadowMap.autoUpdate = prevShadowAuto;
       this.renderer.toneMapping = prevTone;
     }
+  }
+
+  dispose() {
+    if (this.renderTarget) {
+      this.renderTarget.dispose();
+      this.renderTarget = null;
+    }
+    this.pools.length = 0;
+    this.excludeObjects.length = 0;
+    this.activePool = null;
   }
 }

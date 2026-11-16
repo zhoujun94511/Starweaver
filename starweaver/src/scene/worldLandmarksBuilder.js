@@ -9,6 +9,7 @@ import {
 } from '../graphics/proceduralMeshes.js';
 import { clamp, getTerrainHeight, smoothstep } from '../utils/math.js';
 import { mergeTransformedGeometries } from '../utils/geometryBatcher.js';
+import { createMiningDroneFleet } from '../entities/companionBotFactory.js';
 
 export function buildRelayBridgeAndPylons(world) {
   // Custom GLSL Scrolling Photonic Energy Bridge Deck!
@@ -862,102 +863,17 @@ export function buildMothershipWreckageAndDrones(world) {
     side: THREE.DoubleSide
   });
 
-  // Shared geometries across both autonomous mining drones
-  const hullUpperGeo = new THREE.SphereGeometry(0.26, 16, 12);
-  const hullCoreGeo = new THREE.CylinderGeometry(0.24, 0.19, 0.13, 14);
-  const visorGeo = new THREE.BoxGeometry(0.26, 0.085, 0.12);
-  const eyeGeo = new THREE.SphereGeometry(0.036, 10, 8);
-  const antennaStemGeo = new THREE.CylinderGeometry(0.01, 0.014, 0.18, 6);
-  const antennaTipGeo = new THREE.SphereGeometry(0.024, 8, 6);
-  const armGeo = new THREE.BoxGeometry(0.22, 0.04, 0.06);
-  const ductGeo = new THREE.CylinderGeometry(0.13, 0.14, 0.075, 16, 1, true);
-  const ductRingGeo = new THREE.TorusGeometry(0.13, 0.016, 8, 18);
-  const bladeGeo = new THREE.BoxGeometry(0.21, 0.008, 0.026);
-  const clawGeo = new THREE.BoxGeometry(0.035, 0.14, 0.04);
-  const beamGeo = new THREE.ConeGeometry(0.16, 0.34, 14, 1, true);
-  const cargoGeo = new THREE.OctahedronGeometry(0.115, 0);
-
-  for (let di = 0; di < 2; di++) {
-    const dg = new THREE.Group();
-
-    // 1. Streamlined two-tone fuselage (white ceramic upper shell + dark titanium chassis)
-    const upperShell = new THREE.Mesh(hullUpperGeo, droneShellMat);
-    upperShell.scale.set(1.05, 0.62, 1.24);
-    upperShell.position.y = 0.03;
-
-    const lowerChassis = new THREE.Mesh(hullCoreGeo, droneChassisMat);
-    lowerChassis.position.y = -0.055;
-
-    // 2. Forward optical visor + glowing scanner eye (clear front orientation)
-    const visor = new THREE.Mesh(visorGeo, droneVisorMat);
-    visor.position.set(0, 0.015, 0.255);
-    const scannerEye = new THREE.Mesh(eyeGeo, droneGlowMat);
-    scannerEye.scale.set(1.4, 0.8, 0.7);
-    scannerEye.position.set(0, 0.015, 0.312);
-
-    // 3. Top micro-telemetry antenna
-    const antenna = new THREE.Mesh(antennaStemGeo, droneChassisMat);
-    antenna.position.set(-0.07, 0.22, -0.1);
-    const antennaTip = new THREE.Mesh(antennaTipGeo, droneGlowMat);
-    antennaTip.position.set(-0.07, 0.32, -0.1);
-
-    dg.add(upperShell, lowerChassis, visor, scannerEye, antenna, antennaTip);
-
-    // 4. Symmetric side ducted thrusters with spinning micro-rotors
-    const rotors = [];
-    for (const side of [-1, 1]) {
-      const arm = new THREE.Mesh(armGeo, droneChassisMat);
-      arm.position.set(side * 0.28, -0.01, -0.02);
-
-      const podGroup = new THREE.Group();
-      podGroup.position.set(side * 0.43, 0.0, -0.02);
-
-      const duct = new THREE.Mesh(ductGeo, droneChassisMat);
-      const ductGlow = new THREE.Mesh(ductRingGeo, droneGlowMat);
-      ductGlow.rotation.x = Math.PI / 2;
-      ductGlow.position.y = -0.032;
-
-      const rotorGroup = new THREE.Group();
-      const bladeA = new THREE.Mesh(bladeGeo, droneShellMat);
-      const bladeB = new THREE.Mesh(bladeGeo, droneShellMat);
-      bladeB.rotation.y = Math.PI / 2;
-      rotorGroup.add(bladeA, bladeB);
-      rotors.push(rotorGroup);
-
-      podGroup.add(duct, ductGlow, rotorGroup);
-      dg.add(arm, podGroup);
-    }
-
-    // 5. Underslung magnetic claws + tractor beam + spinning ore crystal
-    for (const side of [-1, 1]) {
-      const claw = new THREE.Mesh(clawGeo, droneChassisMat);
-      claw.position.set(side * 0.13, -0.15, 0.0);
-      claw.rotation.z = side * 0.32;
-      dg.add(claw);
-    }
-
-    const tractorBeam = new THREE.Mesh(beamGeo, droneBeamMat);
-    tractorBeam.position.y = -0.27;
-
-    const cargoNugget = new THREE.Mesh(
-      cargoGeo,
-      new THREE.MeshStandardMaterial({
-        color: di === 0 ? '#9aa8ff' : '#ffd666',
-        emissive: di === 0 ? '#2b3da8' : '#8f5f00',
-        emissiveIntensity: 1.6
-      })
-    );
-    cargoNugget.position.y = -0.35;
-
-    dg.add(tractorBeam, cargoNugget);
-    world.droneBayGroup.add(dg);
-    world.droneAgents.push({
-      group: dg,
-      phaseOffset: di * Math.PI,
-      rotors,
-      cargo: cargoNugget,
-      beam: tractorBeam
-    });
+  const fleet = createMiningDroneFleet({
+    count: 2,
+    droneShellMat,
+    droneChassisMat,
+    droneVisorMat,
+    droneGlowMat,
+    droneBeamMat
+  });
+  for (const agent of fleet) {
+    world.droneBayGroup.add(agent.group);
+    world.droneAgents.push(agent);
   }
 
   world.droneBayGroup.visible = world.state.hasEquipment('drone_fleet');

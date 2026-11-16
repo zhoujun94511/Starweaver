@@ -226,8 +226,8 @@ function buildValleyGeology(parent, colliders, batch, m) {
   const placements = [[], []];
   // Individual rocks occur in talus families and riverbank pockets. Their
   // sculpture is shared; only transforms and muted lichen colours are instanced.
-  for (let i = 0; i < 24; i++) {
-    const a = random() * TAU, r = 25 + random() * 24;
+  for (let i = 0; i < 38; i++) {
+    const a = random() * TAU, r = i < 24 ? 25 + random() * 24 : 52 + random() * 24;
     const x = Math.cos(a) * r, z = Math.sin(a) * r;
     if (getHomeworldRouteDistance(x, z) < 4.3 ||
       HOMEWORLD_DISTRICTS.some(d => Math.hypot(x - d.x, z - d.z) < 7.4) ||
@@ -450,7 +450,11 @@ function buildGrove(parent, colliders, batch, materials) {
     // Outer valley perimeter grove framing the alpine foothills (all > 4.5m clear of routes & welcome sightlines!)
     [-25.5, 7.5], [-33.5, 15.0], [-19.5, 22.5], [25.5, -14.5],
     [35.5, -6.5], [41.5, 18.5], [34.5, 31.0], [-22.5, 36.5],
-    [18.5, 48.0], [-25.0, 46.5]
+    [18.5, 48.0], [-25.0, 46.5],
+    // Gateway & outer meadow tree framing (r = 54..74, clear of platforms & aerial rings!)
+    [-16.5, -64.5], [16.5, -64.5], [-29.0, -56.0], [29.0, -56.0],
+    [-11.0, -73.0], [11.0, -73.0], [-56.0, 10.0], [58.0, -16.0],
+    [-48.0, 42.0], [24.0, 62.0], [-24.0, 62.0], [4.0, 68.0]
   ];
   const canopyPalettes = [
     ['#0f3d23', '#195732', '#267342', '#3a8f52'],
@@ -867,9 +871,9 @@ function buildUndergrowth(parent, m) {
   blade.setAttribute('color', new THREE.Float32BufferAttribute(bladeCol, 3));
   blade.computeVertexNormals();
   const transforms = [];
-  for (let i = 0; i < 3400; i++) {
+  for (let i = 0; i < 4200; i++) {
     const a = random() * TAU;
-    const r = i < 900 ? 7.1 + random() * 18.5 : Math.sqrt(500 + random() * 2200);
+    const r = i < 900 ? 7.1 + random() * 18.5 : Math.sqrt(500 + random() * 5500);
     const x = Math.cos(a) * r, z = Math.sin(a) * r;
     if (getHomeworldRouteDistance(x, z) < 1.65 ||
       HOMEWORLD_DISTRICTS.some(d => Math.hypot(x - d.x, z - d.z) < 5.1) ||
@@ -979,13 +983,15 @@ function buildWildflowerMeadow(parent, flowerMat) {
 function createHomeworldWaterMaterial(pbrLibrary, waterUniforms) {
   const mat = new THREE.MeshPhysicalMaterial({
     name: 'homeworld-flowing-water',
-    color: '#1f8a88',
-    roughness: 0.12,
-    metalness: 0.14,
-    clearcoat: 0.92,
-    clearcoatRoughness: 0.08,
+    color: '#126466',
+    roughness: 0.18,
+    metalness: 0.08,
+    clearcoat: 0.45,
+    clearcoatRoughness: 0.14,
+    transparent: true,
+    opacity: 0.92,
     normalMap: pbrLibrary?.sand?.normalMap || null,
-    normalScale: new THREE.Vector2(0.04, 0.04)
+    normalScale: new THREE.Vector2(0.06, 0.06)
   });
   mat.customProgramCacheKey = () => 'hw_emerald_water_v3';
   mat.onBeforeCompile = (shader) => {
@@ -1031,26 +1037,27 @@ function createHomeworldWaterMaterial(pbrLibrary, waterUniforms) {
             ? smoothstep(2.4, 4.55, pondR)
             : abs(vWaterUv.y - 0.5) * 2.0;
 
-          vec3 deepWater = mix(vec3(0.06, 0.34, 0.44), vec3(0.18, 0.22, 0.42), uHwSunsetFactor * 0.65);
-          deepWater = mix(deepWater, vec3(0.03, 0.12, 0.24), uHwNightFactor * 0.82);
-          vec3 shallowJade = mix(vec3(0.18, 0.68, 0.62), vec3(0.56, 0.46, 0.52), uHwSunsetFactor * 0.55);
-          shallowJade = mix(shallowJade, vec3(0.08, 0.32, 0.42), uHwNightFactor * 0.72);
+          vec3 deepWater = mix(vec3(0.04, 0.24, 0.32), vec3(0.14, 0.18, 0.34), uHwSunsetFactor * 0.65);
+          deepWater = mix(deepWater, vec3(0.02, 0.08, 0.18), uHwNightFactor * 0.82);
+          vec3 shallowJade = mix(vec3(0.11, 0.48, 0.46), vec3(0.42, 0.34, 0.40), uHwSunsetFactor * 0.55);
+          shallowJade = mix(shallowJade, vec3(0.06, 0.24, 0.34), uHwNightFactor * 0.72);
           vec3 waterBase = mix(deepWater, shallowJade, smoothstep(0.15, 0.92, edgeFactor));
 
           // Soft whitewater foam along riverbanks & churning downstream of the waterwheel (x ~ 8.4, z ~ 39)!
           float wheelWake = (1.0 - smoothstep(0.5, 4.8, length(wxz - vec2(8.4, 39.0)))) * (1.0 - isPond);
-          float bankFoam = smoothstep(0.80, 0.98, edgeFactor + (ripple - 0.5) * 0.24) * 0.42;
-          float wakeFoam = smoothstep(0.42, 0.76, ripple + wheelWake * 0.45) * wheelWake * 0.72;
-          float caustic = smoothstep(0.62, 0.88, ripple) * 0.16;
+          float bankFoam = smoothstep(0.82, 0.99, edgeFactor + (ripple - 0.5) * 0.22) * 0.36;
+          float wakeFoam = smoothstep(0.42, 0.76, ripple + wheelWake * 0.45) * wheelWake * 0.64;
+          float caustic = smoothstep(0.64, 0.90, ripple) * 0.12;
           // Cascading downward whitewater streaks on elevated waterfall curtain (y > 420.2)
           float isCascade = smoothstep(420.15, 421.1, vWaterWorldPos.y);
           float fallStreak = hwWNoise(vec2((vWaterWorldPos.x + vWaterWorldPos.z) * 2.8, vWaterWorldPos.y * 1.45 + uHwWaterTime * 3.8));
-          float cascadeFoam = isCascade * smoothstep(0.36, 0.78, fallStreak) * 0.68;
+          float cascadeFoam = isCascade * smoothstep(0.36, 0.78, fallStreak) * 0.62;
 
-          diffuseColor.rgb = waterBase + vec3(0.16, 0.34, 0.32) * caustic * (1.0 - uHwNightFactor * 0.5);
-          vec3 foamTint = mix(vec3(0.88, 0.96, 0.98), vec3(1.0, 0.84, 0.72), uHwSunsetFactor * 0.55);
-          foamTint = mix(foamTint, vec3(0.48, 0.68, 0.86), uHwNightFactor * 0.55);
-          diffuseColor.rgb = mix(diffuseColor.rgb, foamTint, clamp(bankFoam + wakeFoam + cascadeFoam, 0.0, 0.84));`
+          diffuseColor.rgb = waterBase + vec3(0.10, 0.24, 0.24) * caustic * (1.0 - uHwNightFactor * 0.5);
+          vec3 foamTint = mix(vec3(0.80, 0.92, 0.94), vec3(0.95, 0.78, 0.66), uHwSunsetFactor * 0.55);
+          foamTint = mix(foamTint, vec3(0.42, 0.60, 0.78), uHwNightFactor * 0.55);
+          diffuseColor.rgb = mix(diffuseColor.rgb, foamTint, clamp(bankFoam + wakeFoam + cascadeFoam, 0.0, 0.78));
+          diffuseColor.a = mix(0.92, 0.42, smoothstep(0.76, 1.0, edgeFactor) * (1.0 - isCascade));`
         )
         .replace(
           '#include <lights_fragment_end>',
@@ -1077,10 +1084,10 @@ function createHomeworldWaterMaterial(pbrLibrary, waterUniforms) {
                 }
               }
             }
-            float mirrorBoost = clamp(0.28 + fresnel * 0.68 + uHwSunsetFactor * 0.16 + uHwNightFactor * 0.18, 0.0, 0.92);
+            float mirrorBoost = clamp(0.08 + fresnel * 0.34 + uHwSunsetFactor * 0.10 + uHwNightFactor * 0.12, 0.0, 0.46);
             reflectedLight.indirectSpecular += skyRefl * mirrorBoost;
 
-            float sunSparkle = pow(max(dot(ripN, normalize(sDir + vDir)), 0.0), 135.0) * (1.85 + uHwSunsetFactor * 0.85 + uHwNightFactor * 0.55);
+            float sunSparkle = pow(max(dot(ripN, normalize(sDir + vDir)), 0.0), 150.0) * (1.05 + uHwSunsetFactor * 0.65 + uHwNightFactor * 0.40);
             reflectedLight.directSpecular += uHwSunColor * sunSparkle;
           }`
         );
@@ -1088,11 +1095,65 @@ function createHomeworldWaterMaterial(pbrLibrary, waterUniforms) {
   return mat;
 }
 
-function buildOuterAerialLandmarks(parent, batch, m) {
+function buildOuterValleyOutposts(colliders, batch, m) {
+  // 1. Southwest Garden Pavilion (-46, 36)
+  {
+    const px = -46, pz = 36;
+    const py = groundY(px, pz);
+    batch.add(new RoundedBoxGeometry(5.8, 0.36, 4.8, 2, 0.08), m.dark, [px, py + 0.14, pz], [0, 0.45, 0]);
+    for (const sx of [-2.1, 2.1]) {
+      for (const sz of [-1.7, 1.7]) {
+        const lx = px + sx * Math.cos(0.45) - sz * Math.sin(0.45);
+        const lz = pz + sx * Math.sin(0.45) + sz * Math.cos(0.45);
+        batch.add(new THREE.CylinderGeometry(0.14, 0.18, 2.9, 8), m.trim, [lx, py + 1.6, lz]);
+      }
+    }
+    batch.add(new RoundedBoxGeometry(5.4, 0.22, 4.4, 2, 0.08), m.wall, [px, py + 3.1, pz], [0, 0.45, 0]);
+    batch.add(new THREE.OctahedronGeometry(0.32, 0), m.warm, [px, py + 3.55, pz]);
+    colliders.push({ id: 'hw_outer_pavilion', x: px, z: pz, radius: 3.1, minY: 419, maxY: 426, occluder: true });
+  }
+  // 2. Southeast Wind-Relay Outpost (54, 18)
+  for (let i = 0; i < 2; i++) {
+    const px = 54 + i * 6.2, pz = 18 - i * 4.5;
+    const py = groundY(px, pz);
+    batch.add(new RoundedBoxGeometry(2.2, 0.42, 2.2, 2, 0.06), m.dark, [px, py + 0.18, pz]);
+    batch.add(new THREE.CylinderGeometry(0.24, 0.42, 5.2, 10), m.wall, [px, py + 2.8, pz]);
+    batch.add(new THREE.CylinderGeometry(0.42, 0.42, 0.85, 10), m.trim, [px, py + 5.4, pz], [Math.PI / 2, 0, 0.5]);
+    batch.add(new THREE.OctahedronGeometry(0.24, 0), m.signal, [px, py + 6.05, pz]);
+    colliders.push({ id: `hw_outer_relay_${i}`, x: px, z: pz, radius: 1.35, minY: 419, maxY: 428, occluder: true });
+  }
+  // 3. Northeast Cliffside Overlook (50, -40)
+  {
+    const px = 50, pz = -40;
+    const py = groundY(px, pz);
+    batch.add(new RoundedBoxGeometry(6.4, 0.45, 5.0, 2, 0.08), m.dark, [px, py + 0.18, pz], [0, -0.65, 0]);
+    batch.add(new RoundedBoxGeometry(5.4, 0.25, 4.0, 2, 0.06), m.path, [px, py + 0.44, pz], [0, -0.65, 0]);
+    batch.add(new THREE.CylinderGeometry(0.18, 0.22, 1.55, 8), m.trim, [px, py + 1.25, pz]);
+    batch.add(new THREE.OctahedronGeometry(0.28, 0), m.warm, [px, py + 2.22, pz]);
+    colliders.push({ id: 'hw_outer_overlook', x: px, z: pz, radius: 3.7, minY: 419, maxY: 426, occluder: true });
+  }
+  // 4. Northwest Standing Cairn Circle (-54, -8)
+  {
+    const cx = -54, cz = -8;
+    const cy = groundY(cx, cz);
+    batch.add(new THREE.CylinderGeometry(3.2, 3.5, 0.24, 16), m.dark, [cx, cy + 0.08, cz]);
+    for (let i = 0; i < 5; i++) {
+      const a = i / 5 * TAU + 0.3;
+      const sx = cx + Math.cos(a) * 2.6, sz = cz + Math.sin(a) * 2.6;
+      const h = 1.6 + (i % 3) * 0.55;
+      batch.add(new RoundedBoxGeometry(0.75, h, 0.55, 2, 0.08), m.rock, [sx, groundY(sx, sz) + h * 0.45, sz], [0, -a, 0]);
+    }
+    batch.add(new THREE.OctahedronGeometry(0.36, 0), m.signal, [cx, cy + 1.35, cz]);
+    colliders.push({ id: 'hw_outer_cairn_hub', x: cx, z: cz, radius: 3.1, minY: 419, maxY: 425, occluder: true });
+  }
+}
+
+function buildOuterAerialLandmarks(parent, colliders, batch, m, waterExcludes = null) {
   for (const plat of HOMEWORLD_ELEVATED_PLATFORMS) {
     const baseLocalY = groundY(plat.x, plat.z);
     const topLocalY = plat.topY - HOMEWORLD_CONFIG.baseY;
-    const height = Math.max(2.4, topLocalY - baseLocalY + 0.9);
+    // Stop rock pillar 0.42m below topLocalY so it never coplanar-overlaps deckGeo (eliminates Z-fighting!)
+    const height = Math.max(2.0, topLocalY - baseLocalY + 0.9 - 0.42);
     const pillarGeo = new THREE.CylinderGeometry(plat.radius * 0.92, plat.radius * 1.18, height, 14);
     const colAttr = new Float32Array(pillarGeo.attributes.position.count * 3);
     for (let i = 0; i < pillarGeo.attributes.position.count; i++) {
@@ -1102,6 +1163,15 @@ function buildOuterAerialLandmarks(parent, batch, m) {
     }
     pillarGeo.setAttribute('color', new THREE.BufferAttribute(colAttr, 3));
     batch.add(pillarGeo, m.rock, [plat.x, baseLocalY + height * 0.5 - 0.9, plat.z]);
+    colliders.push({
+      id: `hw_platform_pillar_${plat.id}`,
+      x: plat.x,
+      z: plat.z,
+      radius: plat.radius * 1.14,
+      minY: HOMEWORLD_CONFIG.baseY + baseLocalY - 1.2,
+      maxY: plat.topY - 0.15,
+      occluder: true
+    });
     const deckGeo = new THREE.CylinderGeometry(plat.radius, plat.radius * 1.03, 0.42, 24);
     batch.add(deckGeo, m.path, [plat.x, topLocalY - 0.21, plat.z]);
     const rimGeo = new THREE.TorusGeometry(plat.radius * 0.94, 0.14, 8, 28);
@@ -1118,25 +1188,127 @@ function buildOuterAerialLandmarks(parent, batch, m) {
     }
 
     if (plat.id === 'hw_plat_waterfall') {
-      const fallHeight = Math.max(3.0, topLocalY - baseLocalY);
-      const fallGeo = new THREE.PlaneGeometry(3.4, fallHeight, 1, 6);
+      // 3D projecting spillway chute & parabolic curved waterfall curtain outside the flared pillar!
+      const dirX = -0.62;
+      const dirZ = 0.785;
+      const yaw = Math.atan2(dirX, dirZ);
+      const lipDist = plat.radius * 1.02;
+      const lipX = plat.x + dirX * lipDist;
+      const lipZ = plat.z + dirZ * lipDist;
+      // Stone spillway trough + raised side curbs projecting clear of the rock wall
+      batch.add(new RoundedBoxGeometry(2.8, 0.34, 2.4, 2, 0.06), m.dark, [lipX, topLocalY - 0.12, lipZ], [0, yaw, 0]);
+      for (const side of [-1, 1]) {
+        const perpX = dirZ * side * 1.25;
+        const perpZ = -dirX * side * 1.25;
+        batch.add(new RoundedBoxGeometry(0.32, 0.52, 2.35, 2, 0.05), m.trim, [lipX + perpX, topLocalY + 0.08, lipZ + perpZ], [0, yaw, 0]);
+      }
+      // Curved 3D parabolic waterfall curtain (10x10 subdivided arc, zero intersection with pillar)
+      const poolDist = plat.radius * 1.54;
+      const poolCenterX = plat.x + dirX * poolDist;
+      const poolCenterZ = plat.z + dirZ * poolDist;
+      const poolGround = groundY(poolCenterX, poolCenterZ);
+      const poolWaterY = poolGround + 0.36;
+      const startY = topLocalY + 0.02;
+      const dropH = Math.max(3.0, startY - poolWaterY);
+
+      const cols = 10;
+      const rows = 10;
+      const fallPos = [];
+      const fallUv = [];
+      const fallIdx = [];
+      for (let r = 0; r <= rows; r++) {
+        const t = r / rows;
+        // Parabolic trajectory: projects forward from spillway lip as it falls
+        const forward = 0.65 + Math.pow(t, 0.75) * 2.15;
+        const y = startY - Math.pow(t, 1.35) * dropH;
+        const halfW = 1.05 + t * 0.45;
+        const bulge = Math.sin(t * Math.PI) * 0.18;
+        for (let c = 0; c <= cols; c++) {
+          const u = c / cols;
+          const across = (u * 2 - 1) * halfW;
+          const archZ = Math.cos((u * 2 - 1) * Math.PI * 0.5) * bulge;
+          const localZ = forward + archZ;
+          const wx = lipX + dirX * localZ + dirZ * across;
+          const wz = lipZ + dirZ * localZ - dirX * across;
+          fallPos.push(wx, y, wz);
+          fallUv.push(u, 1 - t);
+        }
+      }
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const a = r * (cols + 1) + c;
+          const b = a + cols + 1;
+          fallIdx.push(a, b, a + 1, a + 1, b, b + 1);
+        }
+      }
+      const fallGeo = new THREE.BufferGeometry();
+      fallGeo.setAttribute('position', new THREE.Float32BufferAttribute(fallPos, 3));
+      fallGeo.setAttribute('uv', new THREE.Float32BufferAttribute(fallUv, 2));
+      fallGeo.setIndex(fallIdx);
+      fallGeo.computeVertexNormals();
       const fallMesh = new THREE.Mesh(fallGeo, m.water);
-      fallMesh.position.set(plat.x - plat.radius * 0.52, baseLocalY + fallHeight * 0.5, plat.z + plat.radius * 0.68);
-      fallMesh.rotation.y = -Math.PI * 0.24;
       fallMesh.name = 'hw-cascade-waterfall-curtain';
       parent.add(fallMesh);
-      const poolGeo = new THREE.CircleGeometry(4.4, 24);
+      waterExcludes?.push(fallMesh);
+
+      // Raised stone-rimmed plunge basin + foam splash ring
+      const basinRim = new THREE.TorusGeometry(3.85, 0.42, 8, 28);
+      basinRim.rotateX(Math.PI / 2);
+      batch.add(basinRim, m.rock, [poolCenterX, poolGround + 0.18, poolCenterZ]);
+      const poolGeo = new THREE.CircleGeometry(3.65, 28);
       poolGeo.rotateX(-Math.PI / 2);
       const poolMesh = new THREE.Mesh(poolGeo, m.water);
-      poolMesh.position.set(plat.x - plat.radius * 0.72, baseLocalY + 0.14, plat.z + plat.radius * 0.94);
+      poolMesh.position.set(poolCenterX, poolWaterY, poolCenterZ);
       poolMesh.name = 'hw-cascade-waterfall-pool';
       parent.add(poolMesh);
+      waterExcludes?.push(poolMesh);
+      const foamRing = new THREE.TorusGeometry(1.45, 0.16, 6, 22);
+      foamRing.rotateX(Math.PI / 2);
+      batch.add(foamRing, m.wall, [poolCenterX - dirX * 0.25, poolWaterY + 0.04, poolCenterZ - dirZ * 0.25]);
     } else if (plat.id === 'hw_plat_arch') {
-      const sailGeo = new THREE.BoxGeometry(0.65, 6.2, 2.2);
-      batch.add(sailGeo, m.trim, [plat.x - 2.6, topLocalY + 3.0, plat.z], [0, 0, -0.18]);
-      batch.add(sailGeo, m.trim, [plat.x + 2.6, topLocalY + 3.0, plat.z], [0, 0, 0.18]);
-      const lintelGeo = new THREE.TorusGeometry(2.6, 0.24, 8, 20, Math.PI);
-      batch.add(lintelGeo, m.warm, [plat.x, topLocalY + 5.2, plat.z]);
+      // Ceremonial Emerald North Gateway: stepped plinths, flanked energy pylons, twin-arch & suspended crest
+      batch.add(new RoundedBoxGeometry(10.6, 0.45, 5.4, 2, 0.08), m.dark, [plat.x, topLocalY + 0.12, plat.z]);
+      batch.add(new RoundedBoxGeometry(9.2, 0.36, 4.4, 2, 0.08), m.wall, [plat.x, topLocalY + 0.42, plat.z]);
+      for (const side of [-1, 1]) {
+        const px = plat.x + side * 3.15;
+        batch.add(new RoundedBoxGeometry(1.75, 1.35, 2.5, 3, 0.10), m.dark, [px, topLocalY + 0.95, plat.z]);
+        batch.add(new RoundedBoxGeometry(1.15, 5.4, 1.85, 3, 0.12), m.wall, [px, topLocalY + 3.4, plat.z], [0, 0, side * 0.12]);
+        batch.add(new RoundedBoxGeometry(0.42, 5.9, 2.15, 2, 0.06), m.trim, [px + side * 0.45, topLocalY + 3.55, plat.z], [0, 0, side * 0.14]);
+        batch.add(new THREE.BoxGeometry(0.18, 4.2, 0.22), m.signal, [px - side * 0.58, topLocalY + 3.3, plat.z + 0.55], [0, 0, side * 0.12]);
+        batch.add(new THREE.BoxGeometry(0.18, 4.2, 0.22), m.signal, [px - side * 0.58, topLocalY + 3.3, plat.z - 0.55], [0, 0, side * 0.12]);
+        colliders.push({
+          id: `hw_arch_pylon_${side > 0 ? 'r' : 'l'}`,
+          x: px,
+          z: plat.z,
+          radius: 1.35,
+          minY: HOMEWORLD_CONFIG.baseY + topLocalY - 0.1,
+          maxY: HOMEWORLD_CONFIG.baseY + topLocalY + 6.2,
+          occluder: true
+        });
+        // Flanking approach bollards & lantern posts outside and inside the gateway
+        for (const zOff of [-3.4, 3.4]) {
+          const bx = plat.x + side * 4.4;
+          const bz = plat.z + zOff;
+          const bGround = groundY(bx, bz);
+          batch.add(new RoundedBoxGeometry(0.95, 1.1, 0.95, 2, 0.08), m.dark, [bx, bGround + 0.45, bz]);
+          batch.add(new THREE.CylinderGeometry(0.16, 0.22, 1.4, 8), m.trim, [bx, bGround + 1.55, bz]);
+          batch.add(new THREE.OctahedronGeometry(0.24, 0), m.warm, [bx, bGround + 2.42, bz]);
+          colliders.push({
+            id: `hw_arch_bollard_${side > 0 ? 'r' : 'l'}_${zOff > 0 ? 's' : 'n'}`,
+            x: bx,
+            z: bz,
+            radius: 0.65,
+            minY: HOMEWORLD_CONFIG.baseY + bGround - 0.2,
+            maxY: HOMEWORLD_CONFIG.baseY + bGround + 2.7
+          });
+        }
+      }
+      // Twin-layered arch lintel + central suspended star-crest medallion
+      batch.add(new THREE.TorusGeometry(2.85, 0.26, 8, 28, Math.PI), m.trim, [plat.x, topLocalY + 5.35, plat.z]);
+      batch.add(new THREE.TorusGeometry(2.35, 0.11, 6, 24, Math.PI), m.warm, [plat.x, topLocalY + 5.35, plat.z]);
+      batch.add(new THREE.TorusGeometry(0.88, 0.08, 6, 20), m.warm, [plat.x, topLocalY + 6.55, plat.z]);
+      batch.add(new THREE.OctahedronGeometry(0.42, 0), m.signal, [plat.x, topLocalY + 6.55, plat.z]);
+      batch.add(new THREE.BoxGeometry(4.8, 0.08, 0.28), m.signal, [plat.x, topLocalY + 0.62, plat.z]);
     } else if (plat.id === 'hw_plat_astrolabe') {
       const astroGeo = new THREE.TorusGeometry(1.55, 0.12, 8, 24);
       batch.add(astroGeo, m.trim, [plat.x, topLocalY + 2.2, plat.z], [0.42, 0.55, 0]);
@@ -1241,9 +1413,12 @@ export function buildHomeworldLandscape(parent, colliders, pbrLibrary = null) {
   const turbineRotor = buildHabitat(parent, colliders, m);
   const pondMesh = buildPondAndDetails(parent, colliders, batch, m);
   const districts = buildDistricts(parent, colliders, batch, m);
+  const waterExcludes = [];
   const riverMesh = buildRiverwalk(parent, colliders, batch, m);
+  if (riverMesh) waterExcludes.push(riverMesh);
   buildValleyGeology(parent, colliders, batch, m);
-  buildOuterAerialLandmarks(parent, batch, m);
+  buildOuterValleyOutposts(colliders, batch, m);
+  buildOuterAerialLandmarks(parent, colliders, batch, m, waterExcludes);
   buildWetlandUnderstory(parent, batch, m);
   const treeCanopies = buildGrove(parent, colliders, batch, m);
   buildUndergrowth(parent, m);
@@ -1252,5 +1427,5 @@ export function buildHomeworldLandscape(parent, colliders, pbrLibrary = null) {
   mergeLandscapeArchitecture(parent, animatedSet);
   const flowerMaterial = mat('botanical-sample', { color: '#ffffff', roughness: 0.58, vertexColors: true, side: THREE.DoubleSide });
   buildWildflowerMeadow(parent, flowerMaterial);
-  return { turbineRotor, flowerMaterial, waterUniforms, pondMesh, riverMesh, meadow, treeCanopies, cameraOccluders, ...districts };
+  return { turbineRotor, flowerMaterial, waterUniforms, pondMesh, riverMesh, waterExcludes, meadow, treeCanopies, cameraOccluders, ...districts };
 }

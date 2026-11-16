@@ -93,7 +93,8 @@ export class WeatherParticles {
           // Velocity-aligned billboard basis
           vec3 toCam = normalize(cameraPosition - center);
           vec3 right = normalize(uWindDir);
-          vec3 up = normalize(cross(toCam, right));
+          vec3 rawCross = cross(toCam, right);
+          vec3 up = dot(rawCross, rawCross) > 1e-6 ? normalize(rawCross) : vec3(0.0, 1.0, 0.0);
 
           float len = mix(0.52 + aSeed.x * 0.62, (1.85 + aSeed.x * 1.05) * uWispScale, isWisp);
           float thick = mix(0.042 + aSeed.y * 0.032, (0.42 + aSeed.y * 0.28) * uWispScale, isWisp);
@@ -259,6 +260,13 @@ export class WeatherParticles {
     } else {
       this.starDustMesh.visible = false;
     }
+  }
+
+  dispose() {
+    this.sandMesh?.geometry?.dispose();
+    this.sandMesh?.material?.dispose();
+    this.starDustMesh?.geometry?.dispose();
+    this.starDustMesh?.material?.dispose();
   }
 }
 

@@ -1373,7 +1373,7 @@ export class GameState {
     if (available < 2 && !this.homeworldSurvey.completed) {
       return { ok: false, reason: 'missing_crystals', available };
     }
-    if (available >= 2) {
+    if (!this.homeworldSurvey.completed && available >= 2) {
       let toSpend = 2;
       for (const id of candidates) {
         if (toSpend <= 0) break;
@@ -1410,8 +1410,24 @@ export class GameState {
           } else {
             this._addItem(recipe.output.id, recipe.output.count);
           }
+          this.craftedEver[recipe.output.id] =
+            (this.craftedEver[recipe.output.id] || 0) + recipe.output.count;
           this.stats.totalCrafted += 1;
-          this._emit('craft_completed', { recipe, overdrive: true });
+          if (recipe.oneTimeEquipment) {
+            this._emit('equipment_unlocked', {
+              slot: recipe.oneTimeEquipment,
+              itemId: recipe.output.id,
+              recipe,
+              overdrive: true
+            });
+          } else {
+            this._emit('craft_completed', {
+              recipe,
+              outputId: recipe.output.id,
+              count: recipe.output.count,
+              overdrive: true
+            });
+          }
         }
         completedCount += 1;
       } else {

@@ -2290,3 +2290,11 @@ body.touch-active .hud-bottom-center {
   color: #e6f4ff;
   font-size: 11px;
 }
+
+.modal-version-footer {
+  margin-top: 12px;
+  text-align: center;
+  font-size: 11.5px;
+  color: rgba(206, 228, 246, 0.62);
+  letter-spacing: 0.3px;
+}

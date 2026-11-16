@@ -129,6 +129,7 @@ export class SpacecraftBuilder {
       { id: 'ship_ramp_mid', x: 2.85, z: 1.5, radius: 0.85, maxY: 1.8, activeFn: rampVis },
 
       // Homeworld Meadow Colliders (active when strolling Homeworld at Y = 420, ship parked at z = -2.2!)
+      { id: 'hw_ship_thrusters', x: 0, z: -7.25, radius: 1.92, minY: 419, maxY: 424.4, occluder: true, activeFn: homeVis },
       { id: 'hw_ship_aft', x: 0, z: -5.8, radius: 2.6, minY: 419, maxY: 425.2, occluder: true, activeFn: homeVis },
       { id: 'hw_ship_mid', x: 0, z: -2.2, radius: 2.75, minY: 419, maxY: 425.4, occluder: true, activeFn: homeVis },
       { id: 'hw_ship_fwd', x: 0, z: 1.4, radius: 2.25, minY: 419, maxY: 424.6, occluder: true, activeFn: homeVis },
@@ -138,6 +139,15 @@ export class SpacecraftBuilder {
         minY: HOMEWORLD_CONFIG.padY + this.commsPivot.position.y - 2.25,
         maxY: HOMEWORLD_CONFIG.padY + this.commsPivot.position.y + 2.2,
         occluder: true, occluderMinY: HOMEWORLD_CONFIG.padY + this.commsPivot.position.y, activeFn: homeVis },
+      // Homeworld Starweaver swept delta wings + wingtip RCS pods (matching desert wing colliders shifted to z = -2.2)
+      { id: 'hw_ship_wing_l_in', x: -2.45, z: -3.35, radius: 1.48, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_wing_l_out', x: -3.65, z: -4.02, radius: 1.05, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_pod_l_fwd', x: -4.48, z: -3.12, radius: 0.52, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_pod_l_aft', x: -4.48, z: -4.38, radius: 0.52, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_wing_r_in', x: 2.45, z: -3.35, radius: 1.48, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_wing_r_out', x: 3.65, z: -4.02, radius: 1.05, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_pod_r_fwd', x: 4.48, z: -3.12, radius: 0.52, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
+      { id: 'hw_ship_pod_r_aft', x: 4.48, z: -4.38, radius: 0.52, minY: 419, maxY: 422.4, occluder: true, occluderMinY: 420.95, activeFn: homeVis },
       { id: 'hw_cottage_main', x: -10.5, z: -7.8, radius: 3.75, minY: 419, maxY: 424.8, occluder: true, activeFn: homeVis },
       { id: 'hw_cottage_annex', x: -13.6, z: -5.2, radius: 2.25, minY: 419, maxY: 423.8, occluder: true, activeFn: homeVis },
       ...this.homeworldColliders.map((c) => {

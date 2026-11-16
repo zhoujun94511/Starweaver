@@ -273,7 +273,9 @@ export class CameraController {
   }
 
   _enforceHomeworldCurrentSightline() {
-    if (!isHomeworldContext(this.state, this.currentLookAt.y)) return;
+    // Only clamp against Homeworld terrain when the camera target is actually on the Y=420 plane;
+    // otherwise a saved activeWorldPlane='homeworld' would pull the Desert title camera into (0, 2.2, 0.8).
+    if (this.currentLookAt.y <= 200) return;
     this._constrainCameraSegment(this.currentLookAt.x, this.currentLookAt.y, this.currentLookAt.z,
       this.currentPos.x, this.currentPos.y, this.currentPos.z, this._safePosScratch);
     this.currentPos.copy(this._safePosScratch);

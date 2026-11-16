@@ -6,6 +6,7 @@ import { createHomeworldLeafGeometry } from './homeworldLandscape.js';
 import { buildHomeworldResidents, updateHomeworldResidents } from './homeworldCharacters.js';
 import { createHomeworldSurfaceMaterial } from '../graphics/homeworldMaterials.js';
 import { buildUpdraftVisuals, updateUpdraftVisuals } from './updraftVisuals.js';
+import { createHoverDroneMesh } from '../entities/companionBotFactory.js';
 
 const localGroundY = (x, z) => getHomeworldGroundHeight(x, z) - HOMEWORLD_CONFIG.baseY;
 
@@ -409,31 +410,73 @@ export function buildHomeworldEnhancements(homeworldGroup, colliders, pbrLibrary
       minY: 419 + y, maxY: 421.2 + y });
   }
 
-  // Sculpted Emerald Gateway Archway + Promenade Benches + Starweaver Homecoming Monument!
+  // Sci-Fi Emerald Starport Gateway Archway (buttressed titanium pylons, photonic arch truss & rotating holographic star crest)
   const transit = new THREE.Group();
   transit.position.set(2.8, 0, 13.6);
   const arch = new THREE.Mesh(new THREE.TorusGeometry(7.2, 0.24, 10, 48, Math.PI), teal);
-  arch.scale.y = 0.55;
-  add(arch, 0, 6.4, 0, transit);
-  const archTrim = new THREE.Mesh(new THREE.TorusGeometry(7.38, 0.075, 8, 48, Math.PI * 0.92), copper);
-  archTrim.scale.y = 0.55;
-  archTrim.rotation.z = Math.PI * 0.04;
-  add(archTrim, 0, 6.42, 0, transit);
-  for (const x of [-7.2, 7.2]) {
-    const p = new THREE.Mesh(new RoundedBoxGeometry(0.62, 6.4, 0.62, 3, 0.1), ivory);
-    add(p, x, 3.2, 0, transit);
-    const basePlinth = new THREE.Mesh(new RoundedBoxGeometry(0.96, 0.52, 0.96, 2, 0.08), dark);
-    add(basePlinth, x, 0.26, 0, transit);
-    const capCollar = new THREE.Mesh(new RoundedBoxGeometry(0.78, 0.22, 0.78, 2, 0.05), copper);
-    add(capCollar, x, 5.72, 0, transit);
+  arch.scale.y = 0.56;
+  add(arch, 0, 6.45, 0, transit);
+  const archTrim = new THREE.Mesh(new THREE.TorusGeometry(7.52, 0.085, 8, 48, Math.PI * 0.94), copper);
+  archTrim.scale.y = 0.56;
+  archTrim.rotation.z = Math.PI * 0.03;
+  add(archTrim, 0, 6.48, 0, transit);
+  const archEnergy = new THREE.Mesh(new THREE.TorusGeometry(6.92, 0.055, 8, 48, Math.PI * 0.96), cyan);
+  archEnergy.scale.y = 0.56;
+  archEnergy.rotation.z = Math.PI * 0.02;
+  add(archEnergy, 0, 6.42, 0, transit);
+  for (const side of [-1, 1]) {
+    const x = side * 7.2;
+    const basePlinth = new THREE.Mesh(new RoundedBoxGeometry(1.42, 0.44, 1.42, 2, 0.08), dark);
+    add(basePlinth, x, 0.22, 0, transit);
+    const subPlinth = new THREE.Mesh(new RoundedBoxGeometry(1.12, 0.34, 1.12, 2, 0.06), teal);
+    add(subPlinth, x, 0.60, 0, transit);
+    const p = new THREE.Mesh(new RoundedBoxGeometry(0.68, 6.3, 0.72, 3, 0.10), ivory);
+    add(p, x, 3.65, 0, transit);
+    // Outer structural buttress fin & mechanical clamps
+    const fin = new THREE.Mesh(new RoundedBoxGeometry(0.32, 5.2, 0.96, 2, 0.06), teal);
+    fin.rotation.z = side * -0.06;
+    add(fin, x + side * 0.44, 3.1, 0, transit);
+    for (const cy of [1.6, 3.4, 5.2]) {
+      const clamp = new THREE.Mesh(new RoundedBoxGeometry(0.86, 0.20, 0.86, 2, 0.04), copper);
+      add(clamp, x, cy, 0, transit);
+    }
+    // Inner-facing photonic conduit & emitter projector
+    const conduit = new THREE.Mesh(new THREE.BoxGeometry(0.08, 4.9, 0.14), cyan);
+    add(conduit, x - side * 0.36, 3.55, 0, transit);
+    const emitter = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 0.28, 8), dark);
+    emitter.rotation.z = side * Math.PI / 2;
+    add(emitter, x - side * 0.45, 5.85, 0, transit);
+    const capCollar = new THREE.Mesh(new RoundedBoxGeometry(1.06, 0.30, 1.04, 2, 0.06), copper);
+    add(capCollar, x, 6.72, 0, transit);
+    const pylonBeacon = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), cyan);
+    add(pylonBeacon, x, 7.12, 0, transit);
   }
-  const rail = new THREE.Mesh(new RoundedBoxGeometry(15.0, 0.20, 0.30, 3, 0.06), copper);
-  add(rail, 0, 5.7, 0, transit);
-  const archCrest = new THREE.Mesh(new RoundedBoxGeometry(2.8, 0.14, 0.36, 2, 0.04), cyan);
-  add(archCrest, 0, 10.35, 0, transit);
+  // Twin-chord overhead gantry truss with diagonal cross-bracing
+  const railLower = new THREE.Mesh(new RoundedBoxGeometry(15.2, 0.20, 0.42, 3, 0.05), dark);
+  add(railLower, 0, 5.65, 0, transit);
+  const railUpper = new THREE.Mesh(new RoundedBoxGeometry(14.8, 0.16, 0.34, 2, 0.04), copper);
+  add(railUpper, 0, 6.18, 0, transit);
+  const railEnergy = new THREE.Mesh(new THREE.BoxGeometry(13.6, 0.07, 0.12), cyan);
+  add(railEnergy, 0, 5.92, 0, transit);
+  for (let s = -5; s <= 5; s++) {
+    const strut = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.56, 0.24), ivory);
+    strut.rotation.z = (s % 2 === 0 ? 1 : -1) * 0.35;
+    add(strut, s * 1.25, 5.92, 0, transit);
+  }
+  // Central suspended holographic Starweaver crest
+  const gateCrestGroup = new THREE.Group();
+  gateCrestGroup.position.set(0, 8.65, 0);
+  const crestRing = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.06, 8, 28), copper);
+  const crestInner = new THREE.Mesh(new THREE.TorusGeometry(0.68, 0.045, 8, 24), cyan);
+  crestInner.rotation.y = Math.PI * 0.25;
+  const crestCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.36, 0), cyan);
+  crestCore.scale.set(0.85, 1.35, 0.85);
+  gateCrestGroup.add(crestRing, crestInner, crestCore);
+  transit.add(gateCrestGroup);
+  anim.gateCrestGroup = gateCrestGroup;
   homeworldGroup.add(transit);
-  colliders.push({ id: 'hw_transit_left', x: -4.4, z: 13.6, radius: 0.7, minY: 419, maxY: 427.5, occluder: true });
-  colliders.push({ id: 'hw_transit_right', x: 10.0, z: 13.6, radius: 0.7, minY: 419, maxY: 427.5, occluder: true });
+  colliders.push({ id: 'hw_transit_left', x: -4.4, z: 13.6, radius: 0.95, minY: 419, maxY: 428.0, occluder: true });
+  colliders.push({ id: 'hw_transit_right', x: 10.0, z: 13.6, radius: 0.95, minY: 419, maxY: 428.0, occluder: true });
 
   // Colony Promenade Benches overlooking the pond & flower beds
   for (const [bx, bz, byaw] of [[9.8, 2.2, -0.55], [16.5, 3.8, -0.14]]) {
@@ -491,20 +534,19 @@ export function buildHomeworldEnhancements(homeworldGroup, colliders, pbrLibrary
   // with working poses at the survey approach, utility node and grow beds.
   anim.residents = buildHomeworldResidents(homeworldGroup, colliders);
 
-  // Maintenance drones orbiting the promenade are animated in a single update pass.
+  // Shared Sci-Fi Maintenance Hover Drones mounted along clear Homeworld promenade corridors (outside Commons r=6.1 & Solarium r=4.35)
   const droneShell = new THREE.MeshPhysicalMaterial({ color: '#eaf9f6', roughness: 0.22, metalness: 0.4, clearcoat: 0.8 });
-  for (const [x, z, phase] of [[7.0, 6.0, 0.6], [14.5, 9.4, 2.0], [22.8, 7.2, 3.4]]) {
-    const drone = new THREE.Group();
-    drone.position.set(x, 1.3, z);
-    const shell = new THREE.Mesh(new THREE.SphereGeometry(0.42, 16, 12), droneShell);
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.07, 8, 20), cyan);
-    ring.rotation.x = Math.PI / 2;
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.10, 10, 8), cyan);
-    eye.position.z = 0.38;
-    drone.add(shell, ring, eye);
-    mergeLandmarkParts(drone);
+  for (const [x, z, phase] of [[4.2, 4.8, 0.6], [15.8, 14.2, 2.0], [26.2, 7.6, 3.4]]) {
+    const drone = createHoverDroneMesh({
+      shellMat: droneShell,
+      darkMat: dark,
+      accentMat: cyan,
+      mergeFn: mergeLandmarkParts
+    });
+    const baseY = localGroundY(x, z) + 1.45;
+    drone.position.set(x, baseY, z);
     homeworldGroup.add(drone);
-    anim.hoverBots.push({ group: drone, baseY: 1.3, phase, mode: 'drone' });
+    anim.hoverBots.push({ group: drone, baseX: x, baseZ: z, baseY, phase, mode: 'drone' });
   }
 
   // Low profile beacons are landmarks and avoid placing more tall occluders around
@@ -685,24 +727,64 @@ export function buildHomeworldEnhancements(homeworldGroup, colliders, pbrLibrary
     anim.aerialRings.push({ id: r.id, mesh: ringMesh, baseY: r.yOffset, phase: i * 0.8 });
   }
 
-  // Waterfall Mist & Bioluminescent Star-Flora (Nursery Transplant)
-  anim.waterfallMist = [];
-  const mistGeo = new THREE.TorusGeometry(2.1, 0.22, 6, 20);
-  mistGeo.rotateX(Math.PI / 2);
-  const mistMat = new THREE.MeshBasicMaterial({
-    color: '#dffeff',
+  // Soft volumetric-style Points spray & mist over the 3D waterfall plunge pool (zero hard-edged torus rings!)
+  const wfPoolX = 49 - 0.62 * 5.0 * 1.54;
+  const wfPoolZ = 45 + 0.785 * 5.0 * 1.54;
+  const wfBaseY = localGroundY(wfPoolX, wfPoolZ) + 0.42;
+  const mistCount = 42;
+  const mistPos = new Float32Array(mistCount * 3);
+  const mistSeed = new Float32Array(mistCount * 2);
+  for (let k = 0; k < mistCount; k++) {
+    const ang = (k / mistCount) * Math.PI * 2 + (k % 5) * 0.7;
+    const rad = 0.4 + ((k * 37) % 19) / 19 * 2.5;
+    mistPos[k * 3] = wfPoolX + Math.cos(ang) * rad;
+    mistPos[k * 3 + 1] = wfBaseY;
+    mistPos[k * 3 + 2] = wfPoolZ + Math.sin(ang) * rad;
+    mistSeed[k * 2] = (k * 0.173) % 1.0;
+    mistSeed[k * 2 + 1] = 0.8 + ((k * 13) % 7) * 0.16;
+  }
+  const mistGeo = new THREE.BufferGeometry();
+  mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
+  mistGeo.setAttribute('aSeed', new THREE.BufferAttribute(mistSeed, 2));
+  const mistMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uColor: { value: new THREE.Color('#e8fbff') }
+    },
+    vertexShader: `
+      attribute vec2 aSeed;
+      uniform float uTime;
+      varying float vAlpha;
+      void main() {
+        float life = fract(uTime * 0.34 + aSeed.x);
+        vec3 p = position;
+        p.y += life * 2.6 * aSeed.y;
+        p.x += sin(uTime * 0.9 + aSeed.x * 12.0) * 0.35 * life;
+        p.z += cos(uTime * 0.8 + aSeed.x * 9.0) * 0.35 * life;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_PointSize = clamp((130.0 + life * 165.0) * aSeed.y / max(1.0, -mv.z), 6.0, 96.0);
+        vAlpha = sin(life * 3.14159265) * 0.42;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      varying float vAlpha;
+      void main() {
+        vec2 d = gl_PointCoord - vec2(0.5);
+        float r2 = dot(d, d) * 4.0;
+        float soft = pow(max(0.0, 1.0 - r2), 1.8);
+        gl_FragColor = vec4(uColor, soft * vAlpha);
+      }
+    `,
     transparent: true,
-    opacity: 0.28,
     depthWrite: false
   });
-  const wfBaseY = localGroundY(46.4, 48.4);
-  for (let k = 0; k < 4; k++) {
-    const mist = new THREE.Mesh(mistGeo, mistMat);
-    mist.position.set(46.4 + (k % 2 ? 0.35 : -0.35), wfBaseY + 0.25 + k * 0.38, 48.4);
-    mist.name = `hw-waterfall-mist-${k}`;
-    homeworldGroup.add(mist);
-    anim.waterfallMist.push({ mesh: mist, baseY: wfBaseY + 0.25 + k * 0.38, phase: k * 0.25 });
-  }
+  const mistPoints = new THREE.Points(mistGeo, mistMat);
+  mistPoints.name = 'hw-waterfall-mist-points';
+  mistPoints.frustumCulled = false;
+  homeworldGroup.add(mistPoints);
+  anim.waterfallMistMat = mistMat;
 
   anim.nurseryFloraGroup = new THREE.Group();
   anim.nurseryFloraGroup.name = 'hw-nursery-starflora';
@@ -740,8 +822,23 @@ export function updateHomeworldEnhancements(anim, elapsed, dt, opts = {}) {
   if (anim.residents) updateHomeworldResidents(anim.residents, elapsed);
   for (let i = 0; i < anim.hoverBots.length; i++) {
     const item = anim.hoverBots[i];
+    const t = elapsed * 0.42 + item.phase;
+    if (item.baseX !== undefined) {
+      const nx = item.baseX + Math.cos(t) * 1.35;
+      const nz = item.baseZ + Math.sin(t * 2.0) * 0.75;
+      const dx = -Math.sin(t) * 1.35;
+      const dz = Math.cos(t * 2.0) * 1.5;
+      item.group.position.x = nx;
+      item.group.position.z = nz;
+      item.group.rotation.y = Math.atan2(dx, dz);
+    } else {
+      item.group.rotation.y += dt * 0.9;
+    }
     item.group.position.y = item.baseY + Math.sin(elapsed * 2.4 + item.phase) * 0.18;
-    item.group.rotation.y += dt * 0.9;
+  }
+  if (anim.gateCrestGroup) {
+    anim.gateCrestGroup.rotation.y = elapsed * 0.65;
+    anim.gateCrestGroup.position.y = 8.65 + Math.sin(elapsed * 1.8) * 0.14;
   }
   for (let i = 0; i < anim.beaconRings.length; i++) {
     anim.beaconRings[i].rotation.z = elapsed * (0.7 + i * 0.12);
@@ -793,14 +890,8 @@ export function updateHomeworldEnhancements(anim, elapsed, dt, opts = {}) {
       item.mesh.position.y = item.baseY + Math.sin(elapsed * 1.9 + item.phase) * 0.24;
     }
   }
-  if (anim.waterfallMist) {
-    for (let i = 0; i < anim.waterfallMist.length; i++) {
-      const m = anim.waterfallMist[i];
-      const c = (elapsed * 0.65 + m.phase) % 1;
-      m.mesh.scale.setScalar(0.68 + c * 0.92);
-      m.mesh.position.y = (m.baseY ?? m.mesh.position.y) + c * 0.55;
-      m.mesh.rotation.y = elapsed * (i % 2 ? 0.45 : -0.45);
-    }
+  if (anim.waterfallMistMat) {
+    anim.waterfallMistMat.uniforms.uTime.value = elapsed;
   }
   if (anim.colonyGlassMat) {
     const targetGlassEmissive = atmoMode === 'night' ? 0.62 : atmoMode === 'sunset' ? 0.44 : 0.26;

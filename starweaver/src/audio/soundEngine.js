@@ -18,10 +18,23 @@ export class SoundEngine {
     this._chimeTimer = 7.5;
     this._noiseBuffer = null;
     this._resumingPromise = null;
+    this._userActivated = false;
+  }
+
+  unlockFromGesture() {
+    this._userActivated = true;
+    return this.ensureContext();
   }
 
   ensureContext() {
     if (this.muted) return false;
+    if (!this._userActivated) {
+      if (typeof navigator !== 'undefined' && navigator.userActivation?.hasBeenActive) {
+        this._userActivated = true;
+      } else {
+        return false;
+      }
+    }
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return false;
@@ -67,6 +80,9 @@ export class SoundEngine {
 
   setMuted(muted) {
     this.muted = Boolean(muted);
+    if (!this.muted) {
+      this.ensureContext();
+    }
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(
         this.muted ? 0.0 : 0.36,
@@ -78,7 +94,7 @@ export class SoundEngine {
 
   _buildSharedNoiseBuffer() {
     if (!this.ctx) return;
-    const len = this.ctx.sampleRate * 2;
+    const len = this.ctx.sampleRate * 4;
     this._noiseBuffer = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const data = this._noiseBuffer.getChannelData(0);
     let last = 0;
@@ -201,43 +217,60 @@ export class SoundEngine {
 
   _tone(freq, endFreq, duration, type = 'sine', gainPeak = 0.25, delay = 0) {
     if (!this.ensureContext()) return;
-    const t0 = this.ctx.currentTime + delay;
+    if (!Number.isFinite(freq) || freq <= 0 || !Number.isFinite(duration) || duration <= 0) return;
+    const safeGain = Number.isFinite(gainPeak) && gainPeak > 0 ? gainPeak : 0.01;
+    const safeDelay = Number.isFinite(delay) && delay >= 0 ? delay : 0;
+    const t0 = this.ctx.currentTime + safeDelay;
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(freq, t0);
-    if (endFreq && endFreq !== freq) {
+    if (Number.isFinite(endFreq) && endFreq > 0 && endFreq !== freq) {
       osc.frequency.exponentialRampToValueAtTime(Math.max(20, endFreq), t0 + duration);
     }
     g.gain.setValueAtTime(0.0001, t0);
-    g.gain.linearRampToValueAtTime(gainPeak, t0 + Math.min(0.025, duration * 0.25));
+    g.gain.linearRampToValueAtTime(safeGain, t0 + Math.min(0.025, duration * 0.25));
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
     osc.connect(g);
     g.connect(this.masterGain);
+    osc.onended = () => {
+      osc.disconnect();
+      g.disconnect();
+    };
     osc.start(t0);
     osc.stop(t0 + duration + 0.02);
   }
 
   _noiseBurst(duration = 0.06, centerFreq = 900, gainPeak = 0.06, delay = 0) {
     if (!this.ensureContext() || !this._noiseBuffer) return;
-    const t0 = this.ctx.currentTime + delay;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    const safeFreq = Number.isFinite(centerFreq) && centerFreq > 0 ? centerFreq : 900;
+    const safeGain = Number.isFinite(gainPeak) && gainPeak > 0 ? gainPeak : 0.01;
+    const safeDelay = Number.isFinite(delay) && delay >= 0 ? delay : 0;
+    const t0 = this.ctx.currentTime + safeDelay;
     const src = this.ctx.createBufferSource();
     src.buffer = this._noiseBuffer;
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(centerFreq, t0);
+    filter.frequency.setValueAtTime(safeFreq, t0);
     filter.Q.value = 1.8;
 
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, t0);
-    g.gain.linearRampToValueAtTime(gainPeak, t0 + 0.01);
+    g.gain.linearRampToValueAtTime(safeGain, t0 + 0.01);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
 
     src.connect(filter);
     filter.connect(g);
     g.connect(this.masterGain);
-    src.start(t0, Math.random() * 0.8, duration + 0.02);
+    src.onended = () => {
+      src.disconnect();
+      filter.disconnect();
+      g.disconnect();
+    };
+    const maxOffset = Math.max(0, (this._noiseBuffer.duration || 4) - duration - 0.05);
+    src.start(t0, Math.random() * Math.min(0.8, maxOffset), duration + 0.02);
   }
 
   playStep(dt, speedRatio = 1) {
@@ -399,5 +432,14 @@ export class SoundEngine {
     this._jetCooldown = 0.095;
     this._noiseBurst(0.11, 780 + Math.random() * 180, 0.055, 0);
     this._tone(195 + Math.random() * 20, 245, 0.1, 'triangle', 0.052, 0);
+  }
+
+  dispose() {
+    if (this.ctx) {
+      this.ctx.close().catch(() => {});
+      this.ctx = null;
+    }
+    this.masterGain = null;
+    this._noiseBuffer = null;
   }
 }

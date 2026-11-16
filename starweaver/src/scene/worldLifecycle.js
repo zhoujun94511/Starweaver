@@ -19,6 +19,15 @@ function disposeMaterial(mat, sharedMaterials, sharedTextures) {
       tex.dispose();
     }
   }
+  if (mat.uniforms && typeof mat.uniforms === 'object') {
+    for (const key in mat.uniforms) {
+      const u = mat.uniforms[key];
+      const tex = u?.value;
+      if (tex && tex.isTexture && typeof tex.dispose === 'function' && (!sharedTextures || !sharedTextures.has(tex))) {
+        tex.dispose();
+      }
+    }
+  }
   if (typeof mat.dispose === 'function') {
     mat.dispose();
     return 1;
@@ -36,6 +45,9 @@ export function disposeObjectSubtree(root, { sharedMaterials = null, sharedTextu
   const materials = new Set();
 
   root.traverse((obj) => {
+    if (obj.isInstancedMesh && typeof obj.dispose === 'function') {
+      obj.dispose();
+    }
     if (obj.geometry && typeof obj.geometry.dispose === 'function') {
       geometries.add(obj.geometry);
     }

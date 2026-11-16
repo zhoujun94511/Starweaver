@@ -4,7 +4,7 @@
 
 # Starweaver
 
-An offline 3D game of exploration, gathering, and spacecraft repair. The current version is **1.2.0**. The build is a single HTML file of about 1.29 MB.
+An offline 3D sci-fi exploration and survival game—pilot helper bot Milo across five desert biomes, repair Starweaver's seven ship systems, and warp home to the emerald meadow.
 
 [![Three.js](https://img.shields.io/badge/Three.js-r170-black.svg)](https://threejs.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933.svg)](https://nodejs.org)
@@ -18,18 +18,18 @@ An offline 3D game of exploration, gathering, and spacecraft repair. The current
 
 The Starweaver crash-lands on the desert planet Kharis-4. The crew has already evacuated. The helper robot Milo stays behind, gathers minerals, smelts parts, and fits power, communications, life support, navigation, propulsion, a photonic heat shield, and a quantum jump ring back onto the hull. After the pre-flight checks, a four-act return flight lands on the homeworld meadow, which can be walked.
 
-The build output is one HTML file. The current deliverable, `starweaver/dist/starweaver-1.2.0-20261116-202515.html`, is `1,350,448` bytes (about `1.288 MB`). Double-click it to run in a browser, with no requests for external scripts, textures, or fonts. The same file is copied to `docs/index.html`. The interface supports Simplified Chinese and English, and runs on desktop, tablet, and phone. The hard size budget for the single file is `1.5 MB`.
+The build output is a single HTML file in `starweaver/dist/` (also synced to `docs/index.html`). Double-click it to run offline in a browser with no external requests for scripts, textures, or fonts. The interface supports Simplified Chinese and English on desktop, tablet, and phone. The hard size budget is `1.5 MB`.
 
 <img src="./pic/interface-en.webp" alt="Starweaver English interface" width="960" />
 
 ## Features
 
-- Seven continuous levels. Regions, recipes, stations, equipment, and the ship's appearance advance with the repairs. The rules live in data tables.
-- Smelting, fabrication, and batch crafting. Solar smelting follows the day-night cycle and the weather: `1.5×` in clear daylight, `0.85×` under overcast skies, and `0.55×` at night or in a sandstorm. The storage battery holds night and sandstorm smelting at `1.0×`.
-- Sonar drilling, jet flight, and optional gear: treads, a thruster tank, a wide sonar array, and mining drones. Main-path veins have fixed yields and regrow.
-- Clearing the game plays a skippable 12.4-second, four-act return. Milo can then drive and fly across the homeworld meadow. Back on Kharis-4, five climate beacons can be brought online.
-- On medium and small screens the sidebars start collapsed. Touch uses a floating stick. 60 Hz and 90 Hz screens run every frame; faster panels drop to one frame in two.
-- A 1.0.x / 1.1.x local save loads into 1.2.0 and continues into the newly unlocked levels and Homeworld state.
+- **Seven-Stage Desert Progression**: Explore from Crash Basin to the Crystallized Salt Flats and Mothership Wreckage; repairing Starweaver's seven systems progressively transforms the hull and unlocks new biomes.
+- **Weather-Linked Solar Smelting**: Smelting speed shifts with sunlight and storms (`1.5×` in clear daylight, `0.85×` overcast, `0.55×` at night or in sandstorms), stabilized to `1.0×` once the storage battery is installed.
+- **Modular Gear & Auto-Drones**: Unlock the sonar drill, jetpack, wind-resistant treads, wide-band sonar, and autonomous mining drones alongside regenerating ore veins.
+- **Two-World Free Exploration**: After the four-act hyperspace return, roam and fly freely across the Homeworld's Emerald Valley—or return to Kharis-4 anytime to link five biome weather beacons.
+- **Adaptive Controls & Clean Viewport**: Plays smoothly with keyboard/mouse or a floating touch joystick; compact screens auto-collapse side drawers and secondary menus to keep the view clear, while high-refresh displays cap frame pacing to save power.
+- **Seamless Save Migration**: Existing local saves load directly into the latest levels and Homeworld progression.
 
 ## Versions
 

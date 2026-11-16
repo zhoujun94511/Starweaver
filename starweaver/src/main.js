@@ -162,7 +162,7 @@ class LittleBotHomeboundApp {
       .register('homeworld', {
         mount: () => {
           const built = this.spacecraft.ensureHomeworldScene();
-          if (this.postProcessing && this.spacecraft.homeworldGroup) {
+          if (this.postProcessing && this.spacecraft.homeworldGroup && this.state.activeWorldPlane === 'homeworld') {
             this.postProcessing.planeBaseY = this.spacecraft.homeworldGroup.position.y;
           }
           if (built) {
@@ -176,8 +176,15 @@ class LittleBotHomeboundApp {
         },
         unmount: () => {
           const hwVisuals = this.spacecraft.homeworldActivityVisuals;
-          if (hwVisuals?.riverMesh && this.world.planarReflection?.excludedObjects) {
-            this.world.planarReflection.excludedObjects.delete(hwVisuals.riverMesh);
+          if (hwVisuals && this.world.planarReflection) {
+            this.world.planarReflection.unregisterWaterSurface(hwVisuals.pondMesh);
+            if (Array.isArray(hwVisuals.waterExcludes)) {
+              for (const wm of hwVisuals.waterExcludes) {
+                this.world.planarReflection.unregisterExcludedObject(wm);
+              }
+            } else if (hwVisuals.riverMesh) {
+              this.world.planarReflection.unregisterExcludedObject(hwVisuals.riverMesh);
+            }
           }
           if (this.spacecraft.disposeHomeworldScene(this.renderer)) {
             this.allColliders.length = 0;
@@ -675,7 +682,11 @@ class LittleBotHomeboundApp {
         26.0
       );
     }
-    if (hwVisuals && hwVisuals.riverMesh) {
+    if (hwVisuals && Array.isArray(hwVisuals.waterExcludes)) {
+      for (const wm of hwVisuals.waterExcludes) {
+        this.world.planarReflection.registerExcludedObject(wm);
+      }
+    } else if (hwVisuals && hwVisuals.riverMesh) {
       this.world.planarReflection.registerExcludedObject(hwVisuals.riverMesh);
     }
   }
@@ -735,6 +746,9 @@ class LittleBotHomeboundApp {
     this.hud.closeModal();
     this.hud.setIntroOverlay(false);
     this.state.setWorldPlane('homeworld');
+    if (this.postProcessing && this.spacecraft.homeworldGroup) {
+      this.postProcessing.planeBaseY = this.spacecraft.homeworldGroup.position.y;
+    }
     this.spacecraft.enterHomeworldFreeRoam(this.robot);
     this.interaction?.resetScanCache();
     this.guidance?.invalidateCache();
@@ -789,7 +803,7 @@ class LittleBotHomeboundApp {
     window.addEventListener(
       'pointerdown',
       () => {
-        this.sound.ensureContext();
+        this.sound.unlockFromGesture();
       },
       { passive: true }
     );
@@ -816,7 +830,7 @@ class LittleBotHomeboundApp {
     }
 
     window.addEventListener('keydown', (e) => {
-      this.sound.ensureContext();
+      this.sound.unlockFromGesture();
       const code = e.code;
       if (code === 'F9') {
         e.preventDefault();
@@ -865,12 +879,6 @@ class LittleBotHomeboundApp {
         return;
       }
 
-      if (code === 'KeyG') {
-        this.sound.playUiClick();
-        this.state.setGuideArrow(this.state.settings.guideArrow === false);
-        return;
-      }
-
       if (code === 'KeyC') {
         if (this.inHomeworldRoam) {
           e.preventDefault();
@@ -888,6 +896,12 @@ class LittleBotHomeboundApp {
       }
 
       if (this.hud.isBlockingGameplay()) return;
+
+      if (code === 'KeyG') {
+        this.sound.playUiClick();
+        this.state.setGuideArrow(this.state.settings.guideArrow === false);
+        return;
+      }
 
       if (code === 'Space') {
         // Prevent focused HUD buttons from firing when player holds Space for Jetpack!
@@ -996,10 +1010,17 @@ class LittleBotHomeboundApp {
   }
 
   stepFrame(now = performance.now()) {
-    const dt = Math.min(0.05, Math.max(0.001, (now - this._lastTime) / 1000));
+    const isIdlePaused =
+      this.hud.activeModal === 'pause' ||
+      this.hud.activeModal === 'level_complete';
+    const dt = isIdlePaused
+      ? 0
+      : Math.min(0.05, Math.max(0.001, (now - this._lastTime) / 1000));
     this._lastTime = now;
-    this._totalElapsed += dt;
-    this._debugFps = this._debugFps * 0.9 + (1 / Math.max(0.001, dt)) * 0.1;
+    if (!isIdlePaused) {
+      this._totalElapsed += dt;
+      this._debugFps = this._debugFps * 0.9 + (1 / Math.max(0.001, dt)) * 0.1;
+    }
     if (this._debugPanel) {
       this._debugPanel.update(dt);
     }

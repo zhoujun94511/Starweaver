@@ -184,14 +184,16 @@ export function createHomeworldMountainRangeGeometry() {
   // A buried continuation of the meadow fills the gaps below the distant
   // skyline. Its inner boundary stays beyond all walkable terrain (r>82),
   // unlike the old rectangular mountain sheets covering the valley floor.
-  const apron = new THREE.RingGeometry(84.5, 176, 160, 8);
+  const apron = new THREE.RingGeometry(84.5, 176, 160, 12);
   apron.rotateX(-Math.PI / 2);
   const p = apron.attributes.position;
   for (let i = 0; i < p.count; i++) {
     const x = p.getX(i), z = p.getZ(i), r = Math.hypot(x, z);
-    const shoulder = smoothstep(88, 120, r) * (1 - smoothstep(140, 176, r));
-    p.setY(i, groundY(x, z) - 0.44 + shoulder *
-      (fbm2D(x * 0.047 + 4, z * 0.047 - 3, 3) * 2.3));
+    const outerRise = smoothstep(90, 172, r);
+    const ridgeWave = fbm2D(x * 0.032 + 4.2, z * 0.032 - 3.1, 3);
+    const foothill = smoothstep(86, 118, r) * (1 - smoothstep(142, 176, r)) * ridgeWave * 3.4;
+    const rollingHills = outerRise * (5.2 + ridgeWave * 16.5);
+    p.setY(i, groundY(x, z) - 0.44 + foothill + rollingHills);
   }
   apron.computeVertexNormals();
   entries.push({ geo: massifColors(apron) });

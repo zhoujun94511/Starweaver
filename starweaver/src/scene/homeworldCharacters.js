@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { HOMEWORLD_CONFIG, getHomeworldGroundHeight } from '../data/homeworldData.js';
+import { createUtilityRoverBot } from '../entities/companionBotFactory.js';
 
 const CREAM = '#d6d9c9';
 const INK = '#263741';
@@ -459,80 +460,21 @@ function createCrew(spec, index, materials) {
 }
 
 function createUtilityBot(kind, x, z, materials) {
-  const group = new THREE.Group();
-  group.name = `homeworld-companion-${kind}`;
-  group.position.set(x, getHomeworldGroundHeight(x, z) - HOMEWORLD_CONFIG.baseY, z);
-  group.lookAt(0, 0, 2.2);
-  group.userData.role = kind;
-  const parts = batchParts(group, materials);
-  const accent = kind === 'tool' ? '#b78c50' : '#648b89';
-  const width = kind === 'tool' ? 0.70 : 1.05;
-  // Both share the colony's ceramic/metal construction, but the low cargo
-  // chassis and upright tool surveyor have different jobs and silhouettes.
-  parts.add('drive-chassis', box(width, 0.25, 0.72, 0.08), 'metal', INK, 0, 0.27, 0);
-  for (const side of [-1, 1]) for (const wheelZ of [-0.23, 0.23]) {
-    parts.add('all-terrain-wheel', new THREE.CylinderGeometry(0.20, 0.20, 0.13, 12),
-      'textile', '#26353b', side * (width * 0.5 + 0.015), 0.20, wheelZ, 0, 0, Math.PI / 2);
-    parts.add('wheel-hub', new THREE.CylinderGeometry(0.10, 0.10, 0.145, 10),
-      'metal', METAL, side * (width * 0.5 + 0.015), 0.20, wheelZ, 0, 0, Math.PI / 2);
-  }
-  if (kind === 'tool') {
-    parts.add('tapered-service-shell', tailored([
-      [0.36, 0.29, 0.24], [0.46, 0.34, 0.28],
-      [0.88, 0.28, 0.24], [1.00, 0.19, 0.17]
-    ]), 'shell', CREAM);
-    parts.add('chest-diag-frame', box(0.42, 0.24, 0.08, 0.03), 'metal', INK, 0, 0.68, 0.26);
-    parts.add('chest-diag-screen', box(0.32, 0.14, 0.04, 0.015), 'glass', '#58e8d2', 0, 0.68, 0.295);
-    parts.add('backpack-powercell', box(0.36, 0.34, 0.16, 0.04), 'shell', accent, 0, 0.66, -0.26);
-    parts.add('inspection-neck', box(0.11, 0.18, 0.12, 0.03), 'metal', INK, 0, 1.07, 0);
-  } else {
-    parts.add('cargo-deck', box(1.10, 0.13, 0.83, 0.05), 'shell', accent, 0, 0.44, 0);
-    parts.add('sealed-transport-case', box(0.82, 0.50, 0.55, 0.075), 'shell', CREAM, 0, 0.72, -0.13);
-    parts.add('case-lid', box(0.87, 0.075, 0.59, 0.025), 'shell', accent, 0, 0.995, -0.13);
-    for (const side of [-1, 1]) {
-      parts.add('case-restraint', box(0.065, 0.55, 0.58, 0.02), 'textile', INK, side * 0.25, 0.73, -0.13);
-      parts.add('case-latch', box(0.10, 0.12, 0.04, 0.02), 'metal', GOLD, side * 0.25, 0.74, 0.185);
-    }
-    parts.add('sensor-mast', box(0.075, 0.65, 0.075, 0.02), 'metal', METAL, 0.43, 1.04, -0.24);
-  }
-  parts.finish();
-
-  const arms = [];
-  if (kind === 'tool') {
-    for (const side of [-1, 1]) {
-      const armGroup = new THREE.Group();
-      armGroup.name = `${kind}-arm-${side < 0 ? 'l' : 'r'}`;
-      armGroup.position.set(side * 0.36, 0.86, 0.02);
-      const armParts = batchParts(armGroup, materials);
-      armParts.add('shoulder-cap', orb(0.085), 'metal', accent, 0, 0, 0);
-      armParts.add('upper-arm', box(0.08, 0.24, 0.09, 0.025), 'metal', METAL, side * 0.03, -0.14, 0.02, 0.18, 0, side * 0.08);
-      armParts.add('forearm-housing', box(0.09, 0.22, 0.10, 0.025), 'shell', CREAM, side * 0.05, -0.30, 0.13, -0.45, 0, 0);
-      armParts.add('wrist-emitter', new THREE.CylinderGeometry(0.045, 0.045, 0.04, 12), 'glass', '#58e8d2',
-        side * 0.05, -0.39, 0.22, Math.PI / 2);
-      armParts.finish();
-      group.add(armGroup);
-      arms.push({ group: armGroup, side });
-    }
-  }
-  group.userData.arms = arms;
-
-  const head = new THREE.Group();
-  head.name = `${kind}-articulated-sensor`;
-  head.position.set(kind === 'tool' ? 0 : 0.43, kind === 'tool' ? 1.24 : 1.39, kind === 'tool' ? 0 : -0.24);
-  const sensor = batchParts(head, materials);
-  sensor.add('camera-housing', box(0.49, 0.30, 0.36, 0.10), 'shell', CREAM);
-  sensor.add('camera-faceplate', box(0.41, 0.21, 0.07, 0.055), 'metal', INK, 0, 0, 0.175);
-  sensor.add('sensor-antenna', new THREE.CylinderGeometry(0.012, 0.016, 0.18, 8), 'metal', METAL, -0.16, 0.21, -0.06);
-  sensor.add('sensor-antenna-tip', orb(0.028), 'glass', '#66ffba', -0.16, 0.31, -0.06);
-  for (const side of [-1, 1]) {
-    sensor.add('optical-lens', new THREE.CylinderGeometry(side < 0 ? 0.068 : 0.052,
-      side < 0 ? 0.068 : 0.052, 0.025, 12), 'glass', '#66f2dc',
-      side * 0.095, 0.01, 0.225, Math.PI / 2);
-  }
-  sensor.finish();
-  group.add(head);
-  group.userData.sensor = head;
-  return group;
+  const bot = createUtilityRoverBot({
+    kind,
+    x,
+    y: getHomeworldGroundHeight(x, z) - HOMEWORLD_CONFIG.baseY,
+    z,
+    materials,
+    batchPartsFn: batchParts,
+    boxFn: box,
+    orbFn: orb,
+    tailoredFn: tailored,
+    palette: { INK, METAL, CREAM, GOLD },
+    lookAt: [0, 0, 2.2]
+  });
+  bot.name = `homeworld-companion-${kind}`;
+  return bot;
 }
 
 export function buildHomeworldCharacters(homeworldGroup, colliders, pbrLibrary = null) {
@@ -559,8 +501,13 @@ export function buildHomeworldCharacters(homeworldGroup, colliders, pbrLibrary =
   for (const bot of bots) {
     homeworldGroup.add(bot);
     const ground = getHomeworldGroundHeight(bot.position.x, bot.position.z);
-    colliders.push({ id: `hw_bot_${bot.position.x}`, x: bot.position.x, z: bot.position.z,
-      radius: bot.userData.role === 'cargo' ? 0.84 : 0.67, minY: ground - 1, maxY: ground + 2.2 });
+    const col = { id: `hw_bot_${bot.position.x}`, x: bot.position.x, z: bot.position.z,
+      radius: bot.userData.role === 'cargo' ? 0.84 : 0.67, minY: ground - 1, maxY: ground + 2.2 };
+    bot.userData.collider = col;
+    bot.userData.homeX = bot.position.x;
+    bot.userData.homeZ = bot.position.z;
+    bot.userData.homeYaw = bot.rotation.y;
+    colliders.push(col);
   }
   const ceremony = createHomeworldCeremony(crew, bots);
   Object.defineProperty(crew, 'ceremony', { value: ceremony });
@@ -842,9 +789,53 @@ export function updateHomeworldCharacters(crew, bots, elapsed, dt = 0, ceremony 
       figure.collider.z = figure.group.position.z;
     }
   }
+  const botPatrols = [
+    [[-5.2, 5.4], [-7.8, 9.8], [-6.2, 14.2], [-2.8, 10.6]],
+    [[5.2, 5.2], [2.0, 9.2], [1.5, 15.8], [4.2, 14.5]]
+  ];
   for (let i = 0; i < bots.length; i++) {
+    const bot = bots[i];
     const sensor = bots[i].userData.sensor;
     const botClock = active && !settled ? clock : elapsed;
+    const roamBlend = !active ? 1.0 : settled ? ease(arrivalAge, 8.8, 10.4) : 0.0;
+    if (roamBlend > 0.001) {
+      const path = botPatrols[i % botPatrols.length];
+      const cycle = (elapsed * 0.055 + i * 0.35) % 1;
+      const segF = cycle * path.length;
+      const idxA = Math.floor(segF) % path.length;
+      const idxB = (idxA + 1) % path.length;
+      const segT = segF - Math.floor(segF);
+      const pA = path[idxA];
+      const pB = path[idxB];
+      const targetX = mix(pA[0], pB[0], segT);
+      const targetZ = mix(pA[1], pB[1], segT);
+      const hx = bot.userData.homeX ?? bot.position.x;
+      const hz = bot.userData.homeZ ?? bot.position.z;
+      const nx = mix(hx, targetX, roamBlend);
+      const nz = mix(hz, targetZ, roamBlend);
+      bot.position.x = nx;
+      bot.position.z = nz;
+      bot.position.y = getHomeworldGroundHeight(nx, nz) - HOMEWORLD_CONFIG.baseY;
+      const moveYaw = Math.atan2(pB[0] - pA[0], pB[1] - pA[1]);
+      const hy = bot.userData.homeYaw ?? 0;
+      bot.rotation.y = hy + shortAngle(moveYaw - hy) * roamBlend;
+      if (bot.userData.collider) {
+        bot.userData.collider.x = nx;
+        bot.userData.collider.z = nz;
+        const gY = HOMEWORLD_CONFIG.baseY + bot.position.y;
+        bot.userData.collider.minY = gY - 1;
+        bot.userData.collider.maxY = gY + 2.2;
+      }
+    } else if (bot.userData.homeX !== undefined) {
+      bot.position.x = bot.userData.homeX;
+      bot.position.z = bot.userData.homeZ;
+      bot.position.y = getHomeworldGroundHeight(bot.position.x, bot.position.z) - HOMEWORLD_CONFIG.baseY;
+      bot.rotation.y = bot.userData.homeYaw ?? 0;
+      if (bot.userData.collider) {
+        bot.userData.collider.x = bot.position.x;
+        bot.userData.collider.z = bot.position.z;
+      }
+    }
     if (sensor) {
       const acknowledge = arrived ? gesture(arrivalAge, 0.35 + i * 0.25, 0.70 + i * 0.25,
         1.0 + i * 0.25, 1.45 + i * 0.25) : 0;

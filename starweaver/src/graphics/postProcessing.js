@@ -1104,6 +1104,7 @@ export class PostProcessingPipeline {
     this._effH = effH;
     this._hw = hw;
     this._hh = hh;
+    this.dirtBaked = false;
 
     this.rt.sceneHdr.setSize(effW, effH);
     this.rt.compositedHdr.setSize(effW, effH);

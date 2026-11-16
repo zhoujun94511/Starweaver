@@ -1180,7 +1180,7 @@ export class RobotController {
     } else {
       this.isGrounded = true;
       this.vy = 0;
-      if (supportY < -3.2) {
+      if (this.worldPlane === 'desert' && supportY < -3.2) {
         this.position.set(-36.5, getTerrainHeight(-36.5, 0, false), 0);
       } else {
         this.position.y = damp(this.position.y, supportY, 18, dt);
@@ -1207,10 +1207,15 @@ export class RobotController {
       const goldenFlame = Boolean(this.state.cosmetics?.golden_jetflame);
       if (this._goldenFlameActive !== goldenFlame) {
         this._goldenFlameActive = goldenFlame;
-        const hex = goldenFlame ? 0xffd24d : 0x38f3ff;
+        const outerHex = goldenFlame ? 0xffd24d : 0x3cf0ff;
+        const innerHex = goldenFlame ? 0xfff3b8 : 0xffffff;
         for (const pl of this.jetPlumes) {
-          if (pl.material?.color) pl.material.color.setHex(hex);
-          if (pl.material?.emissive) pl.material.emissive.setHex(hex);
+          if (pl.material?.color) pl.material.color.setHex(outerHex);
+          if (pl.material?.emissive) pl.material.emissive.setHex(outerHex);
+          if (pl.children?.length) {
+            if (pl.children[0]?.material?.color) pl.children[0].material.color.setHex(outerHex);
+            if (pl.children[1]?.material?.color) pl.children[1].material.color.setHex(innerHex);
+          }
         }
       }
       const flameScale = thrusting

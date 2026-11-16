@@ -111,8 +111,10 @@ export function writeGameStorageNow(state) {
     }
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     return true;
-  } catch {
-    state.storageAvailable = false;
+  } catch (err) {
+    if (err?.name !== 'QuotaExceededError') {
+      state.storageAvailable = false;
+    }
     return false;
   }
 }

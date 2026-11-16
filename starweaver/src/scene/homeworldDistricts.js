@@ -505,10 +505,14 @@ export function buildRiverwalk(parent, colliders, batch, m) {
   const positions = [], indices = [], uvs = [];
   const count = 160;
   for (let i = 0; i <= count; i++) {
-    const x = -40 + i / count * 84;
-    const z = getHomeworldRiverZ(x), y = getHomeworldRiverSurfaceHeight(x) - HOMEWORLD_CONFIG.baseY;
+    const t = i / count;
+    const x = -40 + t * 84;
+    const endTaper = Math.min(1, Math.min(t, 1 - t) / 0.08);
+    const halfWidth = 1.65 * (0.28 + 0.72 * endTaper);
+    const z = getHomeworldRiverZ(x);
+    const y = getHomeworldRiverSurfaceHeight(x) - HOMEWORLD_CONFIG.baseY - (1 - endTaper) * 0.22;
     for (const side of [-1, 1]) {
-      positions.push(x, y, z + side * 1.6);
+      positions.push(x, y, z + side * halfWidth);
       uvs.push(i / 12, side > 0 ? 1 : 0);
     }
     if (i < count) { const a = i * 2; indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
